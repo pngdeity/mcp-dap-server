@@ -1,9 +1,7 @@
 version: 2
-
 before:
   hooks:
     - go mod tidy
-
 builds:
   - id: mcp-dap-server
     binary: mcp-dap-server
@@ -21,7 +19,6 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
-
 archives:
   - id: default
     formats:
@@ -33,7 +30,6 @@ archives:
     files:
       - LICENSE
       - README.md
-
 dockers:
   # Minimal image - amd64
   - id: minimal-amd64
@@ -41,77 +37,71 @@ dockers:
     goos: linux
     goarch: amd64
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-amd64"
     dockerfile: Dockerfile.minimal
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
-
   # Minimal image - arm64
   - id: minimal-arm64
     ids: [mcp-dap-server]
     goos: linux
     goarch: arm64
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-arm64"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-arm64"
     dockerfile: Dockerfile.minimal
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64"
-
   # Debug image - amd64
   - id: debug-amd64
     ids: [mcp-dap-server]
     goos: linux
     goarch: amd64
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-amd64"
     dockerfile: Dockerfile.debug
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
-
   # Debug image - arm64
   - id: debug-arm64
     ids: [mcp-dap-server]
     goos: linux
     goarch: arm64
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-arm64"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-arm64"
     dockerfile: Dockerfile.debug
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64"
-
 docker_manifests:
   # Minimal image manifests
-  - name_template: "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/go-delve/mcp-dap-server:{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server:{{ .Major }}.{{ .Minor }}"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/go-delve/mcp-dap-server:latest"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server:latest"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server:{{ .Version }}-arm64"
-
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server:{{ .Version }}-arm64"
   # Debug image manifests
-  - name_template: "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Major }}.{{ .Minor }}"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/go-delve/mcp-dap-server-debug:latest"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/pngdeity/mcp-dap-server-debug:latest"
     image_templates:
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-amd64"
-      - "ghcr.io/go-delve/mcp-dap-server-debug:{{ .Version }}-arm64"
-
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-amd64"
+      - "ghcr.io/pngdeity/mcp-dap-server-debug:{{ .Version }}-arm64"
 signs:
   - cmd: cosign
     artifacts: checksum
@@ -121,7 +111,6 @@ signs:
       - "--output-signature=${signature}"
       - "--output-certificate=${certificate}"
       - "${artifact}"
-
 docker_signs:
   - cmd: cosign
     artifacts: manifests
@@ -129,10 +118,8 @@ docker_signs:
       - "sign"
       - "--yes"
       - "${artifact}"
-
 checksum:
   name_template: "checksums.txt"
-
 changelog:
   sort: asc
   groups:
@@ -147,8 +134,7 @@ changelog:
       order: 2
     - title: Other
       order: 999
-
 release:
   github:
-    owner: go-delve
+    owner: pngdeity
     name: mcp-dap-server

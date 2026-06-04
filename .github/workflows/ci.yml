@@ -1,0 +1,171 @@
+name: CI
+on:
+  workflow_dispatch:
+    inputs:
+      go-version:
+        description: 'Go version'
+        required: false
+        default: '1.26'
+        type: string
+      run-lint:
+        description: 'Run linting (golangci-lint + vet)'
+        required: false
+        default: true
+        type: boolean
+      run-unit-tests:
+        description: 'Run unit tests'
+        required: false
+        default: true
+        type: boolean
+      run-integration-tests:
+        description: 'Run integration tests (requires Delve, GDB 14+)'
+        required: false
+        default: false
+        type: boolean
+      run-build:
+        description: 'Cross-compile for all platforms'
+        required: false
+        default: true
+        type: boolean
+      run-docker:
+        description: 'Build Docker images'
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+  packages: write
+jobs:
+  lint:
+    if: ${{ inputs.run-lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+      - name: golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$HOME/go/bin" latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Run lint
+        run: golangci-lint run --timeout=5m
+      - name: go vet
+        run: go vet ./...
+      - name: go mod tidy check
+        run: |
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          diff go.mod.orig go.mod || (echo 'go.mod not tidy; run: go mod tidy' && exit 1)
+          diff go.sum.orig go.sum || (echo 'go.sum not tidy; run: go mod tidy' && exit 1)
+  unit-tests:
+    if: ${{ inputs.run-unit-tests }}
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+      - name: Unit tests
+        run: go test -v -count=1 -short -coverprofile=coverage.out -run 'TestBashBackend|TestDelveBackend|TestGDBBackend|TestFlexInt|TestDAP|TestError' .
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-unit
+          path: coverage.out
+  integration-tests:
+    if: ${{ inputs.run-integration-tests }}
+    needs: [lint]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [delve, gdb]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+      - name: Install Delve
+        run: go install github.com/go-delve/delve/cmd/dlv@latest
+      - name: Install GDB 14+
+        if: ${{ matrix.suite == 'gdb' }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          gdb --version
+      - name: Delve integration tests
+        if: ${{ matrix.suite == 'delve' }}
+        run: go test -v -count=1 -timeout=10m -run 'TestBasic|TestRestart|TestContext|TestVariables|TestStep|TestCoreDump|TestToolListChanges|TestClearBreakpoints|TestInfo|TestDisassemble|TestSetVariable|TestPause|TestStepIn|TestStepOut|TestErrorBeforeDebuggerStarted' .
+      - name: GDB integration tests
+        if: ${{ matrix.suite == 'gdb' }}
+        run: go test -v -count=1 -timeout=10m -run 'TestGDB' .
+  build:
+    if: ${{ inputs.run-build }}
+    needs: [unit-tests]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p bin
+          go build -ldflags="-s -w" -o "bin/mcp-dap-server-${{ matrix.goos }}-${{ matrix.goarch }}" .
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-dap-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/mcp-dap-server-${{ matrix.goos }}-${{ matrix.goarch }}
+  docker:
+    if: ${{ inputs.run-docker }}
+    needs: [build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [minimal, debug]
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download binary
+        uses: actions/download-artifact@v8
+        with:
+          name: mcp-dap-server-linux-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: .
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.image }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: mcp-dap-server:${{ matrix.image }}-${{ github.sha }}
+      - name: Validate image
+        run: docker run --rm mcp-dap-server:${{ matrix.image }}-${{ github.sha }} --version 2>&1 || true
