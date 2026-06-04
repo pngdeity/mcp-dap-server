@@ -1,4 +1,4 @@
-module github.com/go-delve/mcp-dap-server
+module github.com/pngdeity/mcp-dap-server
 
 go 1.26.1
 

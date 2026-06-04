@@ -16,7 +16,7 @@ import (
 )
 
 type debuggerSession struct {
-	mu              sync.Mutex       // serializes DAP requests to prevent concurrent read races
+	mu              sync.Mutex // serializes DAP requests to prevent concurrent read races
 	cmd             *exec.Cmd
 	client          *DAPClient
 	server          *mcp.Server      // MCP server for dynamic tool registration
@@ -41,6 +41,16 @@ func (ds *debuggerSession) defaultThreadID() int {
 	return 1
 }
 
+func (ds *debuggerSession) getStdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser) {
+	switch b := ds.backend.(type) {
+	case *gdbBackend:
+		return b.StdioPipes()
+	case *bashBackend:
+		return b.StdioPipes()
+	}
+	return nil, nil
+}
+
 const debugToolDescription = `Start a complete debugging session.
 
 Modes: 'source' (compile & debug), 'binary' (debug executable), 'core' (debug core dump), 'attach' (connect to process).
@@ -48,8 +58,9 @@ Modes: 'source' (compile & debug), 'binary' (debug executable), 'core' (debug co
 Debugger selection (via 'debugger' parameter):
 - 'delve' (default): For Go programs only. Requires dlv to be installed.
 - 'gdb': For C/C++/Rust and other compiled languages. Requires GDB 14+ with native DAP support (gdb -i dap). GDB does not support 'source' mode; compile your program with debug symbols (gcc -g -O0) and use 'binary' mode.
+- 'bash': For Bash shell scripts. Requires Node.js and the vscode-bash-debug adapter installed. Set bashAdapterPath to the adapter's out/bashDebug.js. Supports 'source' and 'binary' modes (both launch the script). Does not support 'core' or 'attach' modes.
 
-Choose the debugger based on the language of the program being debugged: use 'delve' for Go, use 'gdb' for C/C++/Rust.
+Choose the debugger based on the language of the program being debugged: use 'delve' for Go, use 'gdb' for C/C++/Rust, use 'bash' for Bash scripts.
 
 By default, when stopped at a breakpoint returns a compact stop summary (location only). Set fullContext: true only if you need variables immediately — leave it false unless you plan to call 'context' right after anyway.`
 
@@ -213,19 +224,25 @@ type BreakpointSpec struct {
 
 // DebugParams defines the parameters for starting a complete debug session.
 type DebugParams struct {
-	Mode         string           `json:"mode" mcp:"'source' (compile & debug), 'binary' (debug executable), 'core' (debug core dump), or 'attach' (connect to process)"`
-	Path         string           `json:"path,omitempty" mcp:"program path (required for source/binary modes; optional for core mode with GDB, which can auto-detect it)"`
-	Args         []string         `json:"args,omitempty" mcp:"command line arguments for the program"`
-	CoreFilePath string           `json:"coreFilePath,omitempty" mcp:"path to core dump file (required for core mode)"`
-	ProcessID    int              `json:"processId,omitempty" mcp:"process ID (required for attach mode)"`
-	Breakpoints  []BreakpointSpec `json:"breakpoints,omitempty" mcp:"initial breakpoints"`
-	StopOnEntry  bool             `json:"stopOnEntry,omitempty" mcp:"stop at program entry instead of running to first breakpoint"`
-	Port         string           `json:"port,omitempty" mcp:"port for DAP server (default: auto-assigned)"`
-	Debugger    string `json:"debugger,omitempty" mcp:"debugger to use: 'delve' (default) or 'gdb'"`
-	GDBPath     string `json:"gdbPath,omitempty" mcp:"path to gdb binary (default: auto-detected from PATH). Requires GDB 14+."`
-	ProtocolLog string `json:"protocolLog,omitempty" mcp:"file path for protocol-level DAP message logging (what the MCP server sends/receives)"`
-	ToolLog     string `json:"toolLog,omitempty" mcp:"file path for tool-level DAP logging (native debugger logging, GDB only)"`
-	FullContext bool   `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped at a breakpoint; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	Mode            string           `json:"mode" mcp:"'source' (compile & debug), 'binary' (debug executable), 'core' (debug core dump), or 'attach' (connect to process)"`
+	Path            string           `json:"path,omitempty" mcp:"program path (required for source/binary modes; optional for core mode with GDB, which can auto-detect it)"`
+	Args            []string         `json:"args,omitempty" mcp:"command line arguments for the program"`
+	CoreFilePath    string           `json:"coreFilePath,omitempty" mcp:"path to core dump file (required for core mode)"`
+	ProcessID       int              `json:"processId,omitempty" mcp:"process ID (required for attach mode)"`
+	Breakpoints     []BreakpointSpec `json:"breakpoints,omitempty" mcp:"initial breakpoints"`
+	StopOnEntry     bool             `json:"stopOnEntry,omitempty" mcp:"stop at program entry instead of running to first breakpoint"`
+	Port            string           `json:"port,omitempty" mcp:"port for DAP server (default: auto-assigned)"`
+	Debugger        string           `json:"debugger,omitempty" mcp:"debugger to use: 'delve' (default), 'gdb', or 'bash'"`
+	GDBPath         string           `json:"gdbPath,omitempty" mcp:"path to gdb binary (default: auto-detected from PATH). Requires GDB 14+."`
+	BashAdapterPath string           `json:"bashAdapterPath,omitempty" mcp:"path to vscode-bash-debug adapter's out/bashDebug.js (required for bash backend)"`
+	BashNodePath    string           `json:"bashNodePath,omitempty" mcp:"path to Node.js binary (default: 'node' from PATH)"`
+	BashBashPath    string           `json:"bashBashPath,omitempty" mcp:"path to bash binary (default: '/bin/bash')"`
+	BashCatPath     string           `json:"bashCatPath,omitempty" mcp:"path to cat binary (default: 'cat')"`
+	BashMkfifoPath  string           `json:"bashMkfifoPath,omitempty" mcp:"path to mkfifo binary (default: 'mkfifo')"`
+	BashPkillPath   string           `json:"bashPkillPath,omitempty" mcp:"path to pkill binary (default: 'pkill')"`
+	ProtocolLog     string           `json:"protocolLog,omitempty" mcp:"file path for protocol-level DAP message logging (what the MCP server sends/receives)"`
+	ToolLog         string           `json:"toolLog,omitempty" mcp:"file path for tool-level DAP logging (native debugger logging, GDB only)"`
+	FullContext     bool             `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped at a breakpoint; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
 }
 
 // ContextParams defines the parameters for getting debugging context.
@@ -539,8 +556,8 @@ func (ds *debuggerSession) evaluateExpression(ctx context.Context, _ *mcp.CallTo
 // SetVariableParams defines the parameters for setting a variable.
 type SetVariableParams struct {
 	VariablesReference FlexInt `json:"variablesReference" mcp:"reference to the variable container"`
-	Name               string `json:"name" mcp:"name of the variable to set"`
-	Value              string `json:"value" mcp:"new value for the variable"`
+	Name               string  `json:"name" mcp:"name of the variable to set"`
+	Value              string  `json:"value" mcp:"new value for the variable"`
 }
 
 // setVariable sets the value of a variable in the debugged program.
@@ -574,15 +591,11 @@ func (ds *debuggerSession) restartDebugger(ctx context.Context, _ *mcp.CallToolR
 	if ds.client == nil {
 		return nil, nil, fmt.Errorf("debugger not started")
 	}
-	seq, err := ds.client.RestartRequest(map[string]any{
-		"arguments": map[string]any{
-			"request":     "launch",
-			"mode":        "exec",
-			"stopOnEntry": false,
-			"args":        params.Args,
-			"rebuild":     false,
-		},
-	})
+	restartArgs, err := ds.backend.RestartArgs(params.Args)
+	if err != nil {
+		return nil, nil, err
+	}
+	seq, err := ds.client.RestartRequest(restartArgs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -878,6 +891,15 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 	switch debugger {
 	case "delve":
 		ds.backend = &delveBackend{}
+	case "bash":
+		ds.backend = &bashBackend{
+			nodePath:    params.BashNodePath,
+			adapterPath: params.BashAdapterPath,
+			bashPath:    params.BashBashPath,
+			catPath:     params.BashCatPath,
+			mkfifoPath:  params.BashMkfifoPath,
+			pkillPath:   params.BashPkillPath,
+		}
 	case "gdb":
 		gdbPath := params.GDBPath
 		if gdbPath == "" {
@@ -889,7 +911,7 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 		}
 		ds.backend = &gdbBackend{gdbPath: gdbPath, toolLogPath: params.ToolLog}
 	default:
-		return nil, nil, fmt.Errorf("unsupported debugger: %s (must be 'delve' or 'gdb')", debugger)
+		return nil, nil, fmt.Errorf("unsupported debugger: %s (must be 'delve', 'gdb', or 'bash')", debugger)
 	}
 
 	if params.ToolLog != "" && debugger == "delve" {
@@ -916,8 +938,10 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 		}
 		ds.client = client
 	case "stdio":
-		gdb := ds.backend.(*gdbBackend)
-		stdout, stdin := gdb.StdioPipes()
+		stdout, stdin := ds.getStdioPipes()
+		if stdout == nil {
+			return nil, nil, fmt.Errorf("stdio transport not available for %T backend", ds.backend)
+		}
 		ds.client = newDAPClientFromRWC(&readWriteCloser{
 			Reader:      stdout,
 			WriteCloser: stdin,
@@ -1043,13 +1067,15 @@ initialized:
 		}
 	}
 
-	// Configuration done
-	configSeq, err := ds.client.ConfigurationDoneRequest()
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := readAndValidateResponse(ds.client, configSeq, "unable to complete configuration"); err != nil {
-		return nil, nil, err
+	// Configuration done — only if supported by the adapter
+	if ds.capabilities.SupportsConfigurationDoneRequest {
+		configSeq, err := ds.client.ConfigurationDoneRequest()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := readAndValidateResponse(ds.client, configSeq, "unable to complete configuration"); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// If the launch response was deferred (arrived after the initialized event),

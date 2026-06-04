@@ -38,6 +38,10 @@ type DebuggerBackend interface {
 
 	// AttachArgs builds the debugger-specific arguments map for attaching to a process.
 	AttachArgs(processID int) (map[string]any, error)
+
+	// RestartArgs builds the debugger-specific arguments for a restart request.
+	// Returns nil, nil if the backend does not support restart.
+	RestartArgs(args []string) (map[string]any, error)
 }
 
 // delveBackend implements DebuggerBackend for the Delve debugger (Go).
@@ -147,6 +151,19 @@ func (b *delveBackend) AttachArgs(processID int) (map[string]any, error) {
 	}, nil
 }
 
+// RestartArgs builds the Delve-specific restart arguments.
+func (b *delveBackend) RestartArgs(args []string) (map[string]any, error) {
+	return map[string]any{
+		"arguments": map[string]any{
+			"request":     "launch",
+			"mode":        "exec",
+			"stopOnEntry": false,
+			"args":        args,
+			"rebuild":     false,
+		},
+	}, nil
+}
+
 // gdbBackend implements DebuggerBackend for GDB's native DAP server.
 // Requires GDB 14+. Communicates over stdio.
 type gdbBackend struct {
@@ -253,4 +270,9 @@ func (g *gdbBackend) AttachArgs(processID int) (map[string]any, error) {
 	return map[string]any{
 		"pid": processID,
 	}, nil
+}
+
+// RestartArgs returns nil — GDB's restart support varies; let the adapter use its defaults.
+func (g *gdbBackend) RestartArgs(args []string) (map[string]any, error) {
+	return nil, nil
 }

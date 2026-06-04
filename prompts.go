@@ -14,7 +14,7 @@ func registerPrompts(server *mcp.Server) {
 		Description: "Structured workflow for debugging a program from source code",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "path", Required: true, Description: "Path to the source file or directory to debug"},
-			{Name: "language", Required: false, Description: "Language: 'go' (default) or 'c'/'cpp'"},
+			{Name: "language", Required: false, Description: "Language: 'go' (default), 'c'/'cpp', or 'bash'"},
 			{Name: "breakpoints", Required: false, Description: "Comma-separated file:line pairs, e.g. 'main.go:42,server.go:100'"},
 		},
 	}, promptDebugSource)
@@ -67,6 +67,13 @@ func promptDebugSource(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPr
 > - C: `+"`"+`gcc -g -O0 -o myprogram %s`+"`"+`
 > - C++: `+"`"+`g++ -g -O0 -o myprogram %s`+"`"+`
 > Then use 'binary' mode with the compiled output path.`, path, path)
+	} else if language == "bash" {
+		debugger = "bash"
+		mode = "source"
+		compileNote = `
+> **Note:** Bash debugging requires the vscode-bash-debug adapter. Set bashAdapterPath to the
+> path of the adapter's out/bashDebug.js file. Bash supports 'source' and 'binary' modes
+> (both launch the script).`
 	}
 
 	bpSection := ""
@@ -335,12 +342,12 @@ func promptDebugCoreDump(_ context.Context, req *mcp.GetPromptRequest) (*mcp.Get
 
 	signalGuide := `
 **Signal interpretation:**
-- `+"`"+`SIGSEGV`+"`"+` (segfault) — nil pointer dereference, use-after-free, buffer overflow, stack overflow
-- `+"`"+`SIGABRT`+"`"+` — explicit abort, assertion failure, double-free (C/C++), runtime panic (Go)
-- `+"`"+`SIGFPE`+"`"+` — arithmetic error: division by zero, integer overflow
-- `+"`"+`SIGBUS`+"`"+` — misaligned memory access, unmapped file region
-- `+"`"+`SIGILL`+"`"+` — illegal CPU instruction (often compiler bug or corrupted binary)
-- `+"`"+`SIGPIPE`+"`"+` — write to closed pipe/socket with no signal handler`
+- ` + "`" + `SIGSEGV` + "`" + ` (segfault) — nil pointer dereference, use-after-free, buffer overflow, stack overflow
+- ` + "`" + `SIGABRT` + "`" + ` — explicit abort, assertion failure, double-free (C/C++), runtime panic (Go)
+- ` + "`" + `SIGFPE` + "`" + ` — arithmetic error: division by zero, integer overflow
+- ` + "`" + `SIGBUS` + "`" + ` — misaligned memory access, unmapped file region
+- ` + "`" + `SIGILL` + "`" + ` — illegal CPU instruction (often compiler bug or corrupted binary)
+- ` + "`" + `SIGPIPE` + "`" + ` — write to closed pipe/socket with no signal handler`
 
 	content := fmt.Sprintf(`## Post-Mortem Core Dump Analysis
 
@@ -460,8 +467,8 @@ func promptDebugBinary(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPr
 
 	// Infer likely language/debugger from path or note that both are supported
 	debuggerNote := `Use 'delve' for Go binaries, 'gdb' for C/C++/Rust binaries.
-> - Go binary: `+"`"+`debug(mode="binary", path="...", debugger="delve")`+"`"+`
-> - C/C++ binary: `+"`"+`debug(mode="binary", path="...", debugger="gdb")`+"`"+``
+> - Go binary: ` + "`" + `debug(mode="binary", path="...", debugger="delve")` + "`" + `
+> - C/C++ binary: ` + "`" + `debug(mode="binary", path="...", debugger="gdb")` + "`" + ``
 
 	content := fmt.Sprintf(`## Binary / Assembly-Level Debug Session
 

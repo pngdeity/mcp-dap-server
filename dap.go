@@ -109,23 +109,6 @@ func (c *DAPClient) ReadMessage() (dap.Message, error) {
 	return msg, nil
 }
 
-// LaunchRequest sends a 'launch' request with the specified args.
-func (c *DAPClient) LaunchRequest(mode, program string, stopOnEntry bool, args []string) (int, error) {
-	req := c.newRequest("launch")
-	request := &dap.LaunchRequest{Request: *req}
-	launchArgs := map[string]any{
-		"request":     "launch",
-		"mode":        mode,
-		"program":     program,
-		"stopOnEntry": stopOnEntry,
-	}
-	if len(args) > 0 {
-		launchArgs["args"] = args
-	}
-	request.Arguments = toRawMessage(launchArgs)
-	return req.Seq, c.send(request)
-}
-
 // CoreRequest sends a 'launch' request in core dump mode.
 func (c *DAPClient) CoreRequest(program, coreFilePath string) (int, error) {
 	req := c.newRequest("launch")
