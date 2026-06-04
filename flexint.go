@@ -28,7 +28,7 @@ func (f *FlexInt) UnmarshalJSON(data []byte) error {
 		*f = FlexInt(n)
 		return nil
 	}
-	return fmt.Errorf("cannot unmarshal %s as integer", string(data))
+	return fmt.Errorf("cannot unmarshal %q as integer", string(data))
 }
 
 func (f FlexInt) Int() int {

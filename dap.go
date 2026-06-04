@@ -109,19 +109,6 @@ func (c *DAPClient) ReadMessage() (dap.Message, error) {
 	return msg, nil
 }
 
-// CoreRequest sends a 'launch' request in core dump mode.
-func (c *DAPClient) CoreRequest(program, coreFilePath string) (int, error) {
-	req := c.newRequest("launch")
-	request := &dap.LaunchRequest{Request: *req}
-	request.Arguments = toRawMessage(map[string]any{
-		"request":      "launch",
-		"mode":         "core",
-		"program":      program,
-		"coreFilePath": coreFilePath,
-	})
-	return req.Seq, c.send(request)
-}
-
 // newRequest creates a new DAP request with the given command and an
 // auto-incremented sequence number. The caller can read the assigned
 // sequence number from the returned request's Seq field.
@@ -294,14 +281,6 @@ func (c *DAPClient) DisconnectRequest(terminateDebuggee bool) (int, error) {
 	return req.Seq, c.send(request)
 }
 
-// ExceptionInfoRequest sends an 'exceptionInfo' request.
-func (c *DAPClient) ExceptionInfoRequest(threadID int) (int, error) {
-	req := c.newRequest("exceptionInfo")
-	request := &dap.ExceptionInfoRequest{Request: *req}
-	request.Arguments.ThreadId = threadID
-	return req.Seq, c.send(request)
-}
-
 // SetVariableRequest sends a 'setVariable' request.
 func (c *DAPClient) SetVariableRequest(variablesRef int, name, value string) (int, error) {
 	req := c.newRequest("setVariable")
@@ -322,21 +301,6 @@ func (c *DAPClient) RestartRequest(arguments map[string]any) (int, error) {
 	return req.Seq, c.send(request)
 }
 
-// TerminateRequest sends a 'terminate' request.
-func (c *DAPClient) TerminateRequest() (int, error) {
-	req := c.newRequest("terminate")
-	request := &dap.TerminateRequest{Request: *req}
-	return req.Seq, c.send(request)
-}
-
-// StepBackRequest sends a 'stepBack' request.
-func (c *DAPClient) StepBackRequest(threadID int) (int, error) {
-	req := c.newRequest("stepBack")
-	request := &dap.StepBackRequest{Request: *req}
-	request.Arguments.ThreadId = threadID
-	return req.Seq, c.send(request)
-}
-
 // LoadedSourcesRequest sends a 'loadedSources' request.
 func (c *DAPClient) LoadedSourcesRequest() (int, error) {
 	req := c.newRequest("loadedSources")
@@ -351,27 +315,6 @@ func (c *DAPClient) ModulesRequest() (int, error) {
 	return req.Seq, c.send(request)
 }
 
-// BreakpointLocationsRequest sends a 'breakpointLocations' request.
-func (c *DAPClient) BreakpointLocationsRequest(source string, line int) (int, error) {
-	req := c.newRequest("breakpointLocations")
-	request := &dap.BreakpointLocationsRequest{Request: *req}
-	request.Arguments.Source = dap.Source{
-		Path: source,
-	}
-	request.Arguments.Line = line
-	return req.Seq, c.send(request)
-}
-
-// CompletionsRequest sends a 'completions' request.
-func (c *DAPClient) CompletionsRequest(text string, column int, frameID int) (int, error) {
-	req := c.newRequest("completions")
-	request := &dap.CompletionsRequest{Request: *req}
-	request.Arguments.Text = text
-	request.Arguments.Column = column
-	request.Arguments.FrameId = frameID
-	return req.Seq, c.send(request)
-}
-
 // DisassembleRequest sends a 'disassemble' request.
 func (c *DAPClient) DisassembleRequest(memoryReference string, instructionOffset, instructionCount int) (int, error) {
 	req := c.newRequest("disassemble")
@@ -379,50 +322,5 @@ func (c *DAPClient) DisassembleRequest(memoryReference string, instructionOffset
 	request.Arguments.MemoryReference = memoryReference
 	request.Arguments.InstructionOffset = instructionOffset
 	request.Arguments.InstructionCount = instructionCount
-	return req.Seq, c.send(request)
-}
-
-// SetExceptionBreakpointsRequest sends a 'setExceptionBreakpoints' request.
-func (c *DAPClient) SetExceptionBreakpointsRequest(filters []string) (int, error) {
-	req := c.newRequest("setExceptionBreakpoints")
-	request := &dap.SetExceptionBreakpointsRequest{Request: *req}
-	request.Arguments.Filters = filters
-	return req.Seq, c.send(request)
-}
-
-// DataBreakpointInfoRequest sends a 'dataBreakpointInfo' request.
-func (c *DAPClient) DataBreakpointInfoRequest(variablesRef int, name string) (int, error) {
-	req := c.newRequest("dataBreakpointInfo")
-	request := &dap.DataBreakpointInfoRequest{Request: *req}
-	request.Arguments.VariablesReference = variablesRef
-	request.Arguments.Name = name
-	return req.Seq, c.send(request)
-}
-
-// SetDataBreakpointsRequest sends a 'setDataBreakpoints' request.
-func (c *DAPClient) SetDataBreakpointsRequest(breakpoints []dap.DataBreakpoint) (int, error) {
-	req := c.newRequest("setDataBreakpoints")
-	request := &dap.SetDataBreakpointsRequest{Request: *req}
-	request.Arguments.Breakpoints = breakpoints
-	return req.Seq, c.send(request)
-}
-
-// SourceRequest sends a 'source' request.
-func (c *DAPClient) SourceRequest(sourceRef int) (int, error) {
-	req := c.newRequest("source")
-	request := &dap.SourceRequest{Request: *req}
-	request.Arguments.SourceReference = sourceRef
-	return req.Seq, c.send(request)
-}
-
-// AttachRequest sends an 'attach' request.
-func (c *DAPClient) AttachRequest(mode string, processID int) (int, error) {
-	req := c.newRequest("attach")
-	request := &dap.AttachRequest{Request: *req}
-	request.Arguments = toRawMessage(map[string]any{
-		"request":   "attach",
-		"mode":      mode,
-		"processId": processID,
-	})
 	return req.Seq, c.send(request)
 }

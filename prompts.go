@@ -198,6 +198,9 @@ Call: `+"`"+`stop()`+"`"+`
 			if debugger == "delve" {
 				return "dlv"
 			}
+			if debugger == "bash" {
+				return "node (bash-debug-adapter)"
+			}
 			return "gdb (native DAP)"
 		}(),
 	)

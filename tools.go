@@ -409,16 +409,17 @@ func (ds *debuggerSession) continueExecution(ctx context.Context, _ *mcp.CallToo
 	// If "to" is specified, set a temporary breakpoint
 	if params.To != nil {
 		to := params.To
+		var bpSeq int
+		var bpErr error
 		if to.Function != "" {
-			if _, err := ds.client.SetFunctionBreakpointsRequest([]string{to.Function}); err != nil {
-				return nil, nil, err
-			}
+			bpSeq, bpErr = ds.client.SetFunctionBreakpointsRequest([]string{to.Function})
 		} else if to.File != "" && to.Line > 0 {
-			if _, err := ds.client.SetBreakpointsRequest(to.File, []int{to.Line}); err != nil {
-				return nil, nil, err
-			}
+			bpSeq, bpErr = ds.client.SetBreakpointsRequest(to.File, []int{to.Line})
 		}
-		if _, err := ds.client.ReadMessage(); err != nil {
+		if bpErr != nil {
+			return nil, nil, bpErr
+		}
+		if err := readAndValidateResponse(ds.client, bpSeq, "unable to set temporary breakpoint"); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -527,6 +528,11 @@ func (ds *debuggerSession) evaluateExpression(ctx context.Context, _ *mcp.CallTo
 		}
 		switch resp := msg.(type) {
 		case *dap.EvaluateResponse:
+			if resp.GetResponse().RequestSeq != evalSeq {
+				log.Printf("evaluate: skipping out-of-order EvaluateResponse (request_seq=%d, waiting for %d)",
+					resp.GetResponse().RequestSeq, evalSeq)
+				continue
+			}
 			if !resp.Success {
 				return nil, nil, fmt.Errorf("unable to evaluate expression: %s", resp.Message)
 			}
@@ -915,7 +921,7 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 	}
 
 	if params.ToolLog != "" && debugger == "delve" {
-		log.Printf("warning: tool-level logging is not supported for Delve; Delve DAP logs go to the server log")
+		return nil, nil, fmt.Errorf("tool-level logging (toolLog) is not supported for Delve; set gdbPath to use GDB native DAP tool logging")
 	}
 
 	if mode == "core" && params.Path == "" && debugger != "gdb" {
@@ -1142,7 +1148,9 @@ initialized:
 				ds.stoppedThreadID = stoppedThreadID
 				goto stopped
 			case *dap.TerminatedEvent:
-				goto stopped
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated before reaching breakpoint"}},
+				}, nil, nil
 			}
 		}
 	stopped:
@@ -1224,25 +1232,26 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 	}
 
 	// Execute the appropriate step command
+	var stepSeq int
 	switch params.Mode {
 	case "over":
-		stepSeq, err := ds.client.NextRequest(threadID)
+		seq, err := ds.client.NextRequest(threadID)
 		if err != nil {
 			return nil, nil, err
 		}
-		_ = stepSeq
+		stepSeq = seq
 	case "in":
-		stepSeq, err := ds.client.StepInRequest(threadID)
+		seq, err := ds.client.StepInRequest(threadID)
 		if err != nil {
 			return nil, nil, err
 		}
-		_ = stepSeq
+		stepSeq = seq
 	case "out":
-		stepSeq, err := ds.client.StepOutRequest(threadID)
+		seq, err := ds.client.StepOutRequest(threadID)
 		if err != nil {
 			return nil, nil, err
 		}
-		_ = stepSeq
+		stepSeq = seq
 	default:
 		return nil, nil, fmt.Errorf("invalid step mode: %s (must be 'over', 'in', or 'out')", params.Mode)
 	}
@@ -1255,8 +1264,13 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 		}
 		switch resp := msg.(type) {
 		case dap.ResponseMessage:
-			if !resp.GetResponse().Success {
-				return nil, nil, fmt.Errorf("step failed: %s", resp.GetResponse().Message)
+			r := resp.GetResponse()
+			if r.RequestSeq != stepSeq {
+				log.Printf("step: skipping out-of-order response (request_seq=%d, waiting for %d)", r.RequestSeq, stepSeq)
+				continue
+			}
+			if !r.Success {
+				return nil, nil, fmt.Errorf("step failed: %s", r.Message)
 			}
 		case *dap.StoppedEvent:
 			ds.stoppedThreadID = resp.Body.ThreadId

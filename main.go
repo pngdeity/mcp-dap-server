@@ -19,7 +19,7 @@ func main() {
 	// the goroutine and hangs the server.
 	logPath := filepath.Join(os.TempDir(), "mcp-dap-server.log")
 	var logWriter io.Writer
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		// Discard logs if we can't open the file — do NOT fall back to stderr
 		logWriter = io.Discard
