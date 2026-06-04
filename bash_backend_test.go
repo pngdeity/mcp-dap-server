@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestBashInterfaceCompliance(t *testing.T) {
+	testBackendCompliance(t, func() DebuggerBackend {
+		return &bashdbBackend{
+			bashPath:   "/bin/bash",
+			catPath:    "cat",
+			mkfifoPath: "mkfifo",
+			pkillPath:  "pkill",
+		}
+	})
+}
+
 func TestBashBackendLaunchArgs(t *testing.T) {
 	backend := &bashdbBackend{
 		bashPath:   "/bin/bash",
@@ -117,6 +128,9 @@ func TestBashBackendTransportMode(t *testing.T) {
 }
 
 func TestBashBackendSpawn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not found in PATH")
 	}
