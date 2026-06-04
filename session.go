@@ -214,10 +214,12 @@ func (ds *debuggerSession) getThreadList() string {
 	}
 	seq, err := ds.client.ThreadsRequest()
 	if err != nil {
+		log.Printf("getThreadList: ThreadsRequest failed: %v", err)
 		return ""
 	}
 	resp, err := readTypedResponse[*dap.ThreadsResponse](ds.client, seq)
 	if err != nil {
+		log.Printf("getThreadList: readTypedResponse failed: %v", err)
 		return ""
 	}
 	var threads strings.Builder

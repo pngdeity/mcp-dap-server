@@ -35,6 +35,9 @@ func readAndValidateResponse(client *DAPClient, requestSeq int, errorPrefix stri
 			return nil
 		case dap.EventMessage:
 			continue
+		default:
+			log.Printf("readAndValidateResponse: skipping unexpected message type %T (waiting for request_seq=%d)", msg, requestSeq)
+			continue
 		}
 	}
 }
@@ -77,6 +80,9 @@ func readTypedResponse[T dap.ResponseMessage](client *DAPClient, requestSeq int)
 			}
 			return zero, fmt.Errorf("expected %T, got %T (request_seq=%d)", zero, resp, requestSeq)
 		case dap.EventMessage:
+			continue
+		default:
+			log.Printf("readTypedResponse: skipping unexpected message type %T (waiting for request_seq=%d)", msg, requestSeq)
 			continue
 		}
 	}
@@ -513,11 +519,30 @@ func (ds *debuggerSession) stop(ctx context.Context, _ *mcp.CallToolRequest, par
 func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, params DebugParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
-	// Clean up any existing session before starting a new one
 	ds.cleanup()
 
-	// Default port
-	port := params.Port
+	port, mode, err := ds.validateDebugParams(params)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := ds.spawnAndConnect(port, params.ProtocolLog); err != nil {
+		return nil, nil, err
+	}
+	if err := ds.startSession(params, mode); err != nil {
+		return nil, nil, err
+	}
+	if err := ds.waitForInitialized(); err != nil {
+		return nil, nil, err
+	}
+	if err := ds.configureSession(params.Breakpoints); err != nil {
+		return nil, nil, err
+	}
+	ds.registerSessionTools()
+	return ds.handleFirstStop(params, mode)
+}
+
+func (ds *debuggerSession) validateDebugParams(params DebugParams) (port, mode string, err error) {
+	port = params.Port
 	if port == "" {
 		port = "0"
 	}
@@ -525,113 +550,112 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 		port = ":" + port
 	}
 
-	// Validate mode
-	mode := params.Mode
+	mode = params.Mode
 	switch mode {
 	case "source", "binary", "core", "attach":
-		// valid
 	default:
-		return nil, nil, fmt.Errorf("invalid mode: %s (must be 'source', 'binary', 'core', or 'attach')", mode)
+		return "", "", fmt.Errorf("invalid mode: %s (must be 'source', 'binary', 'core', or 'attach')", mode)
 	}
 
-	// Validate required parameters
 	if mode == "attach" {
 		if params.ProcessID == 0 {
-			return nil, nil, fmt.Errorf("processId is required for attach mode")
+			return "", "", fmt.Errorf("processId is required for attach mode")
 		}
 	} else if mode == "core" {
 		if params.CoreFilePath == "" {
-			return nil, nil, fmt.Errorf("coreFilePath is required for core mode")
+			return "", "", fmt.Errorf("coreFilePath is required for core mode")
 		}
 	} else {
 		if params.Path == "" {
-			return nil, nil, fmt.Errorf("path is required for %s mode", mode)
+			return "", "", fmt.Errorf("path is required for %s mode", mode)
 		}
 	}
 
-	// Select debugger backend
 	backend, err := newBackend(params)
 	if err != nil {
-		return nil, nil, err
+		return "", "", err
 	}
 	ds.backend = backend
 
 	if params.ToolLog != "" && params.Debugger == "delve" {
-		return nil, nil, fmt.Errorf("tool-level logging (toolLog) is not supported for Delve; use gdb for tool-level logging")
+		return "", "", fmt.Errorf("tool-level logging (toolLog) is not supported for Delve; use gdb for tool-level logging")
 	}
 
-	if mode == "core" && params.Path == "" && params.Debugger != "gdb" && params.Debugger != "" {
-		return nil, nil, fmt.Errorf("path is required for core mode with %s (only GDB can auto-detect the executable from a core file)", params.Debugger)
+	if mode == "core" && params.Path == "" {
+		if _, isGDB := ds.backend.(*gdbBackend); !isGDB {
+			return "", "", fmt.Errorf("path is required for core mode with this debugger (only GDB can auto-detect the executable from a core file)")
+		}
 	}
+	return port, mode, nil
+}
 
-	// Spawn DAP server via backend
+func (ds *debuggerSession) spawnAndConnect(port, protocolLog string) error {
 	cmd, listenAddr, err := ds.backend.Spawn(port, ds.logWriter)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	ds.cmd = cmd
 
-	// Connect DAP client based on transport mode
 	switch ds.backend.TransportMode() {
 	case "tcp":
 		client, err := newDAPClient(listenAddr)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		ds.client = client
 	case "stdio":
 		stdout, stdin := ds.backend.StdioPipes()
 		if stdout == nil {
-			return nil, nil, fmt.Errorf("stdio transport not available for %T backend", ds.backend)
+			return fmt.Errorf("stdio transport not available for %T backend", ds.backend)
 		}
 		ds.client = newDAPClientFromRWC(&readWriteCloser{
 			Reader:      stdout,
 			WriteCloser: stdin,
 		})
 	default:
-		return nil, nil, fmt.Errorf("unsupported transport mode: %s", ds.backend.TransportMode())
+		return fmt.Errorf("unsupported transport mode: %s", ds.backend.TransportMode())
 	}
 
-	// Protocol-level DAP message logging
-	if params.ProtocolLog != "" {
-		f, err := os.Create(params.ProtocolLog)
+	if protocolLog != "" {
+		f, err := os.Create(protocolLog)
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to open protocol log file: %w", err)
+			return fmt.Errorf("unable to open protocol log file: %w", err)
 		}
 		ds.protocolLogFile = f
 		ds.client.SetProtocolLogger(f)
 	}
+	return nil
+}
 
+func (ds *debuggerSession) startSession(params DebugParams, mode string) error {
 	caps, err := ds.client.InitializeRequest(ds.backend.AdapterID())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	ds.capabilities = caps
 
-	// Store session state
 	ds.launchMode = mode
 	ds.programPath = params.Path
 	ds.programArgs = params.Args
 	ds.coreFilePath = params.CoreFilePath
 
-	// Launch or attach using backend-specific args
 	stopOnEntry := params.StopOnEntry || len(params.Breakpoints) == 0
 	switch mode {
 	case "source", "binary":
 		launchArgs, err := ds.backend.LaunchArgs(mode, params.Path, stopOnEntry, params.Args)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		req := ds.client.newRequest("launch")
 		request := &dap.LaunchRequest{Request: *req}
 		request.Arguments = toRawMessage(launchArgs)
 		if err := ds.client.send(request); err != nil {
-			return nil, nil, err
+			return err
 		}
 	case "core":
 		coreArgs, err := ds.backend.CoreArgs(params.Path, params.CoreFilePath)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		rawArgs := toRawMessage(coreArgs)
 		var request dap.Message
@@ -642,94 +666,77 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 			req := ds.client.newRequest("launch")
 			request = &dap.LaunchRequest{Request: *req, Arguments: rawArgs}
 		} else {
-			return nil, nil, fmt.Errorf("unsupported core request type: %s", ds.backend.CoreRequestType())
+			return fmt.Errorf("unsupported core request type: %s", ds.backend.CoreRequestType())
 		}
 		if err := ds.client.send(request); err != nil {
-			return nil, nil, err
+			return err
 		}
 	case "attach":
 		attachArgs, err := ds.backend.AttachArgs(params.ProcessID)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		req := ds.client.newRequest("attach")
 		request := &dap.AttachRequest{Request: *req}
 		request.Arguments = toRawMessage(attachArgs)
 		if err := ds.client.send(request); err != nil {
-			return nil, nil, err
+			return err
 		}
 	}
-	// After sending the launch/attach request, we must handle two DAP patterns:
-	//
-	// Delve: launch response arrives immediately, then initialized event.
-	//
-	// GDB native DAP: may send an "initialized" event before or after the
-	// launch response.
-	//
-	// We unify both by reading messages until we see the initialized event.
-	// The launch response may arrive before or after — if it arrives here,
-	// we consume it. If it arrives later, it will be automatically skipped
-	// as an out-of-order response by subsequent seq-based readers.
+	return nil
+}
+
+func (ds *debuggerSession) waitForInitialized() error {
 	for {
 		msg, err := ds.client.ReadMessage()
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		switch resp := msg.(type) {
 		case dap.ResponseMessage:
 			if !resp.GetResponse().Success {
-				return nil, nil, fmt.Errorf("unable to start debug session: %s", resp.GetResponse().Message)
+				return fmt.Errorf("unable to start debug session: %s", resp.GetResponse().Message)
 			}
-			// Launch response consumed; continue reading for initialized event
 		case *dap.InitializedEvent:
-			_ = resp
-			goto initialized
+			return nil
 		}
 	}
-initialized:
+}
 
-	// Set breakpoints
-	for _, bp := range params.Breakpoints {
+func (ds *debuggerSession) configureSession(breakpoints []BreakpointSpec) error {
+	for _, bp := range breakpoints {
 		if bp.Function != "" {
 			seq, err := ds.client.SetFunctionBreakpointsRequest([]string{bp.Function})
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			if err := readAndValidateResponse(ds.client, seq, "unable to set function breakpoint"); err != nil {
-				return nil, nil, err
+				return err
 			}
 		} else if bp.File != "" && bp.Line > 0 {
 			seq, err := ds.client.SetBreakpointsRequest(bp.File, []int{bp.Line})
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			if err := readAndValidateResponse(ds.client, seq, "unable to set breakpoint"); err != nil {
-				return nil, nil, err
+				return err
 			}
 		}
 	}
 
-	// Configuration done — only if supported by the adapter
 	if ds.capabilities.SupportsConfigurationDoneRequest {
 		configSeq, err := ds.client.ConfigurationDoneRequest()
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		if err := readAndValidateResponse(ds.client, configSeq, "unable to complete configuration"); err != nil {
-			return nil, nil, err
+			return err
 		}
 	}
+	return nil
+}
 
-	// If the launch response was deferred (arrived after the initialized event),
-	// it will be automatically consumed and skipped as an out-of-order response by
-	// subsequent readAndValidateResponse/readTypedResponse calls, which match
-	// by request_seq.
-
-	// Register session-specific tools based on capabilities
-	ds.registerSessionTools()
-
-	// For core dump mode, the program is already stopped at the crash point.
-	// Wait for the StoppedEvent from the adapter before returning context.
+func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mcp.CallToolResult, any, error) {
 	if mode == "core" {
 		for {
 			msg, err := ds.client.ReadMessage()
@@ -753,17 +760,6 @@ initialized:
 		}
 	}
 
-	// If we have breakpoints and not explicitly stopping on entry, wait for the
-	// debuggee to reach a breakpoint. Different adapters behave differently:
-	//
-	// Delve: stops at entry point first (reason="entry"), then requires
-	// ContinueRequest to proceed to the breakpoint.
-	//
-	// GDB native DAP: with stopAtBeginningOfMainSubprogram=false, may run directly to breakpoint
-	// without stopping at entry first.
-	//
-	// We handle both by reading the first StoppedEvent. If it's an entry stop,
-	// we send ContinueRequest and wait for the next stop.
 	if len(params.Breakpoints) > 0 && !params.StopOnEntry {
 		var stoppedThreadID int
 		for {
@@ -774,7 +770,6 @@ initialized:
 			switch ev := msg.(type) {
 			case *dap.StoppedEvent:
 				if ev.Body.Reason == "entry" {
-					// Stopped at entry — send continue to reach the breakpoint
 					if _, err := ds.client.ContinueRequest(ev.Body.ThreadId); err != nil {
 						return nil, nil, err
 					}
@@ -800,9 +795,18 @@ initialized:
 		return stopSummary(result, "breakpoint"), nil, nil
 	}
 
-	// Return simple success message when stopped on entry.
-	// The StoppedEvent from the adapter (if any) will be consumed by the
-	// next readTypedResponse call, which skips EventMessages.
+	msg, err := ds.client.ReadMessage()
+	if err != nil {
+		return nil, nil, err
+	}
+	switch ev := msg.(type) {
+	case *dap.StoppedEvent:
+		ds.stoppedThreadID = ev.Body.ThreadId
+	case *dap.TerminatedEvent:
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
+		}, nil, nil
+	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Debug session started for %s. Use 'breakpoint' to set breakpoints and 'continue' to run.", params.Path)}},
 	}, nil, nil
@@ -823,7 +827,7 @@ func (ds *debuggerSession) context(ctx context.Context, _ *mcp.CallToolRequest, 
 	result, err := ds.getFullContext(threadID, params.FrameID.Int(), maxFrames)
 	if err != nil {
 		// If the thread ID was invalid, try to help by listing available threads
-		if strings.Contains(err.Error(), "threadId") || strings.Contains(err.Error(), "thread") {
+		if strings.Contains(err.Error(), "threadId") {
 			threadList := ds.getThreadList()
 			if threadList != "" {
 				return nil, nil, fmt.Errorf("%w\n\nAvailable threads (use info tool with type 'threads' to refresh):\n%s", err, threadList)

@@ -10,6 +10,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const clientInstructions = `mcp-dap-server: Debug Adapter Protocol bridge.
+Use the 'debug' tool to start a session, then use breakpoint, continue, step, context,
+evaluate, and stop to control debugging. See 'debug-source' prompt for guided workflows.
+Delve (Go), GDB 14+ (C/C++), and vscode-bash-debug (Bash) are supported.`
+
 var version = "dev"
 
 func main() {
@@ -37,7 +42,10 @@ func main() {
 		Name:    "mcp-dap-server",
 		Version: version,
 	}
-	server := mcp.NewServer(&implementation, nil)
+	server := mcp.NewServer(&implementation, &mcp.ServerOptions{
+		Instructions: clientInstructions,
+		Capabilities: &mcp.ServerCapabilities{},
+	})
 
 	ds := registerTools(server, logWriter)
 	defer ds.cleanup()

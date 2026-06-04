@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 
 	"github.com/google/go-dap"
 )
@@ -141,7 +142,7 @@ func (c *DAPClient) SetBreakpointsRequest(file string, lines []int) (int, error)
 	request := &dap.SetBreakpointsRequest{Request: *req}
 	request.Arguments = dap.SetBreakpointsArguments{
 		Source: dap.Source{
-			Name: file,
+			Name: filepath.Base(file),
 			Path: file,
 		},
 		Breakpoints: make([]dap.SourceBreakpoint, len(lines)),

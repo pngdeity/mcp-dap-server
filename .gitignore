@@ -6,3 +6,5 @@ dist/
 testdata/**/*.dSYM/
 testdata/**/debugprog
 .claude
+ARCHITECTURE_REVIEW.md
+PROTOCOL_COVERAGE.md

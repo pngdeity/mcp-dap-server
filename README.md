@@ -35,7 +35,10 @@ The MCP DAP Server acts as a bridge between MCP clients and DAP-compatible debug
 
 ### Prerequisites
 - Go 1.24.4 or later
-- A DAP-compatible debugger for your target language
+- A DAP-compatible debugger for your target language:
+  - **Go**: [Delve](https://github.com/go-delve/delve) (`go install github.com/go-delve/delve/cmd/dlv@latest`)
+  - **C/C++**: GDB 14+ (native DAP via `gdb -i dap`)
+  - **Bash**: Node.js + [vscode-bash-debug](https://github.com/rogalmic/vscode-bash-debug) adapter (`npm install vscode-bash-debug`, then set `bashAdapterPath` to `out/bashDebug.js`)
 
 ### Building from Source
 
