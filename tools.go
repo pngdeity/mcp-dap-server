@@ -4,272 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/google/go-dap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
-
-type debuggerSession struct {
-	mu              sync.Mutex // serializes DAP requests to prevent concurrent read races
-	cmd             *exec.Cmd
-	client          *DAPClient
-	server          *mcp.Server      // MCP server for dynamic tool registration
-	logWriter       io.Writer        // writer for adapter stderr (log file or io.Discard)
-	backend         DebuggerBackend  // debugger-specific backend (delve, gdb, etc.)
-	capabilities    dap.Capabilities // capabilities reported by DAP server
-	launchMode      string           // "source", "binary", "core", or "attach"
-	programPath     string           // path to program being debugged
-	programArgs     []string         // command line arguments
-	coreFilePath    string           // path to core dump file (core mode only)
-	stoppedThreadID int              // thread ID from last StoppedEvent (for adapters that use non-sequential IDs)
-	lastFrameID     int              // frame ID from last getFullContext; -1 means not set (0 is valid for GDB)
-	protocolLogFile *os.File         // protocol log file (closed on cleanup)
-}
-
-// defaultThreadID returns the thread ID to use when none is specified.
-// It returns the thread ID from the last StoppedEvent, or 1 as a fallback.
-func (ds *debuggerSession) defaultThreadID() int {
-	if ds.stoppedThreadID != 0 {
-		return ds.stoppedThreadID
-	}
-	return 1
-}
-
-func (ds *debuggerSession) getStdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser) {
-	switch b := ds.backend.(type) {
-	case *gdbBackend:
-		return b.StdioPipes()
-	case *bashBackend:
-		return b.StdioPipes()
-	}
-	return nil, nil
-}
-
-const debugToolDescription = `Start a complete debugging session.
-
-Modes: 'source' (compile & debug), 'binary' (debug executable), 'core' (debug core dump), 'attach' (connect to process).
-
-Debugger selection (via 'debugger' parameter):
-- 'delve' (default): For Go programs only. Requires dlv to be installed.
-- 'gdb': For C/C++/Rust and other compiled languages. Requires GDB 14+ with native DAP support (gdb -i dap). GDB does not support 'source' mode; compile your program with debug symbols (gcc -g -O0) and use 'binary' mode.
-- 'bash': For Bash shell scripts. Requires Node.js and the vscode-bash-debug adapter installed. Set bashAdapterPath to the adapter's out/bashDebug.js. Supports 'source' and 'binary' modes (both launch the script). Does not support 'core' or 'attach' modes.
-
-Choose the debugger based on the language of the program being debugged: use 'delve' for Go, use 'gdb' for C/C++/Rust, use 'bash' for Bash scripts.
-
-By default, when stopped at a breakpoint returns a compact stop summary (location only). Set fullContext: true only if you need variables immediately — leave it false unless you plan to call 'context' right after anyway.`
-
-// registerTools registers the debugger tools with the MCP server.
-// logWriter is used to redirect adapter stderr output; pass io.Discard to suppress.
-func registerTools(server *mcp.Server, logWriter io.Writer) *debuggerSession {
-	ds := &debuggerSession{server: server, logWriter: logWriter, lastFrameID: -1}
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "debug",
-		Description: debugToolDescription,
-	}, ds.debug)
-
-	return ds
-}
-
-// sessionToolNames returns the names of all currently registered session tools.
-func (ds *debuggerSession) sessionToolNames() []string {
-	tools := []string{
-		"stop",
-		"breakpoint",
-		"clear-breakpoints",
-		"continue",
-		"step",
-		"pause",
-		"context",
-		"evaluate",
-		"info",
-	}
-
-	// Capability-gated tools
-	if ds.capabilities.SupportsRestartRequest {
-		tools = append(tools, "restart")
-	}
-	if ds.capabilities.SupportsSetVariable {
-		tools = append(tools, "set-variable")
-	}
-	if ds.capabilities.SupportsDisassembleRequest {
-		tools = append(tools, "disassemble")
-	}
-
-	return tools
-}
-
-// registerSessionTools removes the debug tool and registers all session-specific tools.
-func (ds *debuggerSession) registerSessionTools() {
-	// Remove debug tool
-	ds.server.RemoveTools("debug")
-
-	// Always-available tools
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name:        "stop",
-		Description: "End the debugging session. By default terminates the debuggee. Pass detach=true to detach without killing the process (leaves it running); detach requires adapter support.",
-	}, ds.stop)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "breakpoint",
-		Description: `Set a breakpoint. Provide EITHER file+line OR function name (not both).
-
-Examples: {"file": "/path/to/main.go", "line": 42} or {"function": "main.processData"}`,
-	}, ds.breakpoint)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "clear-breakpoints",
-		Description: `Remove breakpoints. Provide 'file' to clear breakpoints in a specific file, or 'all': true to clear all breakpoints.
-
-Examples: {"file": "/path/to/main.go"} or {"all": true}`,
-	}, ds.clearBreakpoints)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "continue",
-		Description: `Continue program execution until the next breakpoint or termination.
-
-By default returns a compact stop summary (location only). Set fullContext: true only if you need variables immediately — it saves a separate 'context' call but returns much more data. Leave fullContext false (the default) unless you know you need variables right away.
-
-Optionally specify 'to' for run-to-cursor: {"to": {"file": "/path/main.go", "line": 50}} or {"to": {"function": "main.Run"}}`,
-	}, ds.continueExecution)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "step",
-		Description: `Step through code one line at a time.
-
-By default returns a compact stop summary (location only). Set fullContext: true only if you need variables immediately — it saves a separate 'context' call but returns much more data. Leave fullContext false (the default) unless you know you need variables right away.
-
-Modes: 'over' (execute current line, step over function calls), 'in' (step into function calls), 'out' (run until current function returns).`,
-	}, ds.step)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name:        "pause",
-		Description: "Pause a running program. Use 'context' afterwards to inspect the current state.",
-	}, ds.pauseExecution)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "context",
-		Description: `Get full debugging context at the current stop location. Always returns ALL of the following — source location, full stack trace, and all variables with types and values. There are no flags to control what is included; everything is always returned.
-
-Call with {} (no arguments) to use the current thread and top frame. Only three optional parameters exist: threadId, frameId, maxFrames. Do NOT pass any other parameters. Use 'info' with type 'threads' to discover valid thread IDs.`,
-	}, ds.context)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name: "evaluate",
-		Description: `Evaluate an expression in the debugged program's context. Returns the result value and type. All parameters except 'expression' are optional.
-
-The default context is 'watch', which evaluates language expressions (C, C++, Go). Use valid language syntax, not debugger commands.
-
-Examples: {"expression": "x + y"}, {"expression": "*ptr"}, {"expression": "$rsp"}, {"expression": "(int)value"}
-
-For GDB commands (e.g. print/x), use context 'repl': {"expression": "print/x var", "context": "repl"}`,
-	}, ds.evaluateExpression)
-
-	// Info tool with dynamic description based on adapter capabilities
-	infoTypes := "'threads' (list all threads with IDs, default)"
-	if ds.capabilities.SupportsLoadedSourcesRequest {
-		infoTypes += ", 'sources' (loaded source file paths)"
-	}
-	if ds.capabilities.SupportsModulesRequest {
-		infoTypes += ", 'modules' (loaded modules/libraries)"
-	}
-	infoTypes += ", 'registers' (CPU register values at current frame, GDB only)"
-	infoDesc := fmt.Sprintf("List program metadata. Type: %s.", infoTypes)
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name:        "info",
-		Description: infoDesc,
-	}, ds.info)
-
-	// Capability-gated tools
-	if ds.capabilities.SupportsRestartRequest {
-		mcp.AddTool(ds.server, &mcp.Tool{
-			Name:        "restart",
-			Description: "Restart the debugging session from the beginning. Optionally provide new command line arguments via 'args', or omit to reuse the previous arguments.",
-		}, ds.restartDebugger)
-	}
-	if ds.capabilities.SupportsSetVariable {
-		mcp.AddTool(ds.server, &mcp.Tool{
-			Name: "set-variable",
-			Description: `Modify a variable's value in the debugged program. Requires the variablesReference from a previous 'context' call's scope.
-
-Example: {"variablesReference": 1000, "name": "count", "value": "42"}`,
-		}, ds.setVariable)
-	}
-	if ds.capabilities.SupportsDisassembleRequest {
-		mcp.AddTool(ds.server, &mcp.Tool{
-			Name: "disassemble",
-			Description: `Disassemble machine code at a memory address. Returns assembly instructions.
-
-Example: {"address": "0x00400780"} or {"address": "0x00400780", "count": 30}
-The 'address' is a hex memory address (e.g. from instructionPointerReference in a stack frame). 'count' defaults to 20 instructions.`,
-		}, ds.disassembleCode)
-	}
-}
-
-// unregisterSessionTools removes all session tools and re-registers debug.
-func (ds *debuggerSession) unregisterSessionTools() {
-	ds.server.RemoveTools(ds.sessionToolNames()...)
-
-	mcp.AddTool(ds.server, &mcp.Tool{
-		Name:        "debug",
-		Description: debugToolDescription,
-	}, ds.debug)
-}
-
-// BreakpointSpec specifies a breakpoint location.
-type BreakpointSpec struct {
-	File     string `json:"file,omitempty"`
-	Line     int    `json:"line,omitempty"`
-	Function string `json:"function,omitempty"`
-}
-
-// DebugParams defines the parameters for starting a complete debug session.
-type DebugParams struct {
-	Mode            string           `json:"mode" mcp:"'source' (compile & debug), 'binary' (debug executable), 'core' (debug core dump), or 'attach' (connect to process)"`
-	Path            string           `json:"path,omitempty" mcp:"program path (required for source/binary modes; optional for core mode with GDB, which can auto-detect it)"`
-	Args            []string         `json:"args,omitempty" mcp:"command line arguments for the program"`
-	CoreFilePath    string           `json:"coreFilePath,omitempty" mcp:"path to core dump file (required for core mode)"`
-	ProcessID       int              `json:"processId,omitempty" mcp:"process ID (required for attach mode)"`
-	Breakpoints     []BreakpointSpec `json:"breakpoints,omitempty" mcp:"initial breakpoints"`
-	StopOnEntry     bool             `json:"stopOnEntry,omitempty" mcp:"stop at program entry instead of running to first breakpoint"`
-	Port            string           `json:"port,omitempty" mcp:"port for DAP server (default: auto-assigned)"`
-	Debugger        string           `json:"debugger,omitempty" mcp:"debugger to use: 'delve' (default), 'gdb', or 'bash'"`
-	GDBPath         string           `json:"gdbPath,omitempty" mcp:"path to gdb binary (default: auto-detected from PATH). Requires GDB 14+."`
-	BashAdapterPath string           `json:"bashAdapterPath,omitempty" mcp:"path to vscode-bash-debug adapter's out/bashDebug.js (required for bash backend)"`
-	BashNodePath    string           `json:"bashNodePath,omitempty" mcp:"path to Node.js binary (default: 'node' from PATH)"`
-	BashBashPath    string           `json:"bashBashPath,omitempty" mcp:"path to bash binary (default: '/bin/bash')"`
-	BashCatPath     string           `json:"bashCatPath,omitempty" mcp:"path to cat binary (default: 'cat')"`
-	BashMkfifoPath  string           `json:"bashMkfifoPath,omitempty" mcp:"path to mkfifo binary (default: 'mkfifo')"`
-	BashPkillPath   string           `json:"bashPkillPath,omitempty" mcp:"path to pkill binary (default: 'pkill')"`
-	ProtocolLog     string           `json:"protocolLog,omitempty" mcp:"file path for protocol-level DAP message logging (what the MCP server sends/receives)"`
-	ToolLog         string           `json:"toolLog,omitempty" mcp:"file path for tool-level DAP logging (native debugger logging, GDB only)"`
-	FullContext     bool             `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped at a breakpoint; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
-}
-
-// ContextParams defines the parameters for getting debugging context.
-type ContextParams struct {
-	ThreadID  FlexInt `json:"threadId,omitempty" mcp:"thread to inspect (default: current thread)"`
-	FrameID   FlexInt `json:"frameId,omitempty" mcp:"frame to focus on (default: top frame)"`
-	MaxFrames FlexInt `json:"maxFrames,omitempty" mcp:"maximum stack frames (default: 20)"`
-}
-
-// StepParams defines the parameters for stepping through code.
-type StepParams struct {
-	Mode        string  `json:"mode" mcp:"'over' (next line), 'in' (into function), 'out' (out of function)"`
-	ThreadID    FlexInt `json:"threadId,omitempty" mcp:"thread to step (default: current thread)"`
-	FullContext bool    `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
-}
-
-// InfoParams defines parameters for getting program metadata.
-type InfoParams struct {
-	Type string `json:"type,omitempty" mcp:"'threads' (list threads), 'sources' (loaded source files), 'modules' (loaded modules), or 'registers' (CPU register values at current frame, GDB only)"`
-}
-
-// BreakpointToolParams defines parameters for setting a breakpoint.
-type BreakpointToolParams struct {
-	File     string  `json:"file,omitempty" mcp:"source file path (required if no function)"`
-	Line     FlexInt `json:"line,omitempty" mcp:"line number (required if file provided)"`
-	Function string  `json:"function,omitempty" mcp:"function name (alternative to file+line)"`
-}
 
 // readAndValidateResponse reads DAP messages until it receives the response
 // matching requestSeq. Out-of-order responses (different request_seq) and
@@ -341,17 +82,6 @@ func readTypedResponse[T dap.ResponseMessage](client *DAPClient, requestSeq int)
 	}
 }
 
-// ClearBreakpointsParams defines parameters for clearing breakpoints.
-type ClearBreakpointsParams struct {
-	File string `json:"file,omitempty" mcp:"clear all breakpoints in this file"`
-	All  bool   `json:"all,omitempty" mcp:"clear all breakpoints"`
-}
-
-// StopParams defines parameters for stopping the debug session.
-type StopParams struct {
-	Detach bool `json:"detach,omitempty" mcp:"if true, detach from the process without terminating it (leaves the debuggee running); default false terminates the debuggee"`
-}
-
 // clearBreakpoints removes breakpoints.
 func (ds *debuggerSession) clearBreakpoints(ctx context.Context, _ *mcp.CallToolRequest, params ClearBreakpointsParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -389,13 +119,6 @@ func (ds *debuggerSession) clearBreakpoints(ctx context.Context, _ *mcp.CallTool
 	}
 
 	return nil, nil, fmt.Errorf("specify 'file' or 'all'")
-}
-
-// ContinueParams defines the parameters for continuing execution.
-type ContinueParams struct {
-	ThreadID    FlexInt         `json:"threadId,omitempty" mcp:"thread to continue (default: all threads)"`
-	To          *BreakpointSpec `json:"to,omitempty" mcp:"location to run to (sets temporary breakpoint)"`
-	FullContext bool            `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
 }
 
 // continueExecution continues execution and returns full context when stopped.
@@ -463,11 +186,6 @@ func (ds *debuggerSession) continueExecution(ctx context.Context, _ *mcp.CallToo
 	}
 }
 
-// PauseParams defines the parameters for pausing execution.
-type PauseParams struct {
-	ThreadID FlexInt `json:"threadId" mcp:"thread ID to pause"`
-}
-
 // pauseExecution pauses execution of a thread.
 func (ds *debuggerSession) pauseExecution(ctx context.Context, _ *mcp.CallToolRequest, params PauseParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -486,13 +204,6 @@ func (ds *debuggerSession) pauseExecution(ctx context.Context, _ *mcp.CallToolRe
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: "Paused execution"}},
 	}, nil, nil
-}
-
-// EvaluateParams defines the parameters for evaluating an expression.
-type EvaluateParams struct {
-	Expression string   `json:"expression" mcp:"expression to evaluate"`
-	FrameID    *FlexInt `json:"frameId,omitempty" mcp:"stack frame ID for evaluation context (default: current frame)"`
-	Context    string   `json:"context,omitempty" mcp:"context for evaluation: watch, repl, hover (default: watch)"`
 }
 
 // evaluateExpression evaluates an expression in the context of a stack frame.
@@ -559,13 +270,6 @@ func (ds *debuggerSession) evaluateExpression(ctx context.Context, _ *mcp.CallTo
 	}
 }
 
-// SetVariableParams defines the parameters for setting a variable.
-type SetVariableParams struct {
-	VariablesReference FlexInt `json:"variablesReference" mcp:"reference to the variable container"`
-	Name               string  `json:"name" mcp:"name of the variable to set"`
-	Value              string  `json:"value" mcp:"new value for the variable"`
-}
-
 // setVariable sets the value of a variable in the debugged program.
 func (ds *debuggerSession) setVariable(ctx context.Context, _ *mcp.CallToolRequest, params SetVariableParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -583,11 +287,6 @@ func (ds *debuggerSession) setVariable(ctx context.Context, _ *mcp.CallToolReque
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Set variable %s to %s", params.Name, params.Value)}},
 	}, nil, nil
-}
-
-// RestartParams defines the parameters for restarting the debugger.
-type RestartParams struct {
-	Args []string `json:"args,omitempty" mcp:"new command line arguments for the program upon restart, or empty to reuse previous arguments"`
 }
 
 // restartDebugger restarts the debugging session.
@@ -737,13 +436,6 @@ func (ds *debuggerSession) info(ctx context.Context, _ *mcp.CallToolRequest, par
 	}
 }
 
-// DisassembleParams defines the parameters for disassembling code.
-type DisassembleParams struct {
-	Address string  `json:"address" mcp:"memory address to disassemble (e.g. '0x00400780')"`
-	Offset  FlexInt `json:"offset,omitempty" mcp:"instruction offset from address (default: 0)"`
-	Count   FlexInt `json:"count,omitempty" mcp:"number of instructions to disassemble (default: 20)"`
-}
-
 // disassembleCode disassembles code at a memory reference.
 func (ds *debuggerSession) disassembleCode(ctx context.Context, _ *mcp.CallToolRequest, params DisassembleParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -816,38 +508,6 @@ func (ds *debuggerSession) stop(ctx context.Context, _ *mcp.CallToolRequest, par
 	}, nil, nil
 }
 
-// cleanup kills the DAP adapter process and resets session state.
-// Safe to call multiple times or when no session is active.
-func (ds *debuggerSession) cleanup() {
-	if ds.client != nil {
-		ds.client.Close()
-		ds.client = nil
-	}
-	if ds.protocolLogFile != nil {
-		ds.protocolLogFile.Close()
-		ds.protocolLogFile = nil
-	}
-
-	if ds.cmd != nil && ds.cmd.Process != nil {
-		if err := ds.cmd.Process.Kill(); err != nil {
-			if !strings.Contains(err.Error(), "process already finished") {
-				log.Printf("cleanup: error killing debugger process: %v", err)
-			}
-		}
-		ds.cmd.Wait()
-		ds.cmd = nil
-	}
-
-	ds.launchMode = ""
-	ds.programPath = ""
-	ds.programArgs = nil
-	ds.coreFilePath = ""
-	ds.capabilities = dap.Capabilities{}
-	ds.stoppedThreadID = 0
-	ds.lastFrameID = -1
-	ds.unregisterSessionTools()
-}
-
 // debug starts a complete debugging session.
 // It starts the debugger, loads the program, sets initial breakpoints, and runs to the first breakpoint.
 func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, params DebugParams) (*mcp.CallToolResult, any, error) {
@@ -890,42 +550,18 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 	}
 
 	// Select debugger backend
-	debugger := params.Debugger
-	if debugger == "" {
-		debugger = "delve"
+	backend, err := newBackend(params)
+	if err != nil {
+		return nil, nil, err
 	}
-	switch debugger {
-	case "delve":
-		ds.backend = &delveBackend{}
-	case "bash":
-		ds.backend = &bashBackend{
-			nodePath:    params.BashNodePath,
-			adapterPath: params.BashAdapterPath,
-			bashPath:    params.BashBashPath,
-			catPath:     params.BashCatPath,
-			mkfifoPath:  params.BashMkfifoPath,
-			pkillPath:   params.BashPkillPath,
-		}
-	case "gdb":
-		gdbPath := params.GDBPath
-		if gdbPath == "" {
-			var err error
-			gdbPath, err = exec.LookPath("gdb")
-			if err != nil {
-				return nil, nil, fmt.Errorf("GDB not found in PATH. Install GDB 14+ or set the gdbPath parameter")
-			}
-		}
-		ds.backend = &gdbBackend{gdbPath: gdbPath, toolLogPath: params.ToolLog}
-	default:
-		return nil, nil, fmt.Errorf("unsupported debugger: %s (must be 'delve', 'gdb', or 'bash')", debugger)
+	ds.backend = backend
+
+	if params.ToolLog != "" && params.Debugger == "delve" {
+		return nil, nil, fmt.Errorf("tool-level logging (toolLog) is not supported for Delve; use gdb for tool-level logging")
 	}
 
-	if params.ToolLog != "" && debugger == "delve" {
-		return nil, nil, fmt.Errorf("tool-level logging (toolLog) is not supported for Delve; set gdbPath to use GDB native DAP tool logging")
-	}
-
-	if mode == "core" && params.Path == "" && debugger != "gdb" {
-		return nil, nil, fmt.Errorf("path is required for core mode with %s (only GDB can auto-detect the executable from a core file)", debugger)
+	if mode == "core" && params.Path == "" && params.Debugger != "gdb" && params.Debugger != "" {
+		return nil, nil, fmt.Errorf("path is required for core mode with %s (only GDB can auto-detect the executable from a core file)", params.Debugger)
 	}
 
 	// Spawn DAP server via backend
@@ -944,7 +580,7 @@ func (ds *debuggerSession) debug(ctx context.Context, _ *mcp.CallToolRequest, pa
 		}
 		ds.client = client
 	case "stdio":
-		stdout, stdin := ds.getStdioPipes()
+		stdout, stdin := ds.backend.StdioPipes()
 		if stdout == nil {
 			return nil, nil, fmt.Errorf("stdio transport not available for %T backend", ds.backend)
 		}
@@ -1198,26 +834,6 @@ func (ds *debuggerSession) context(ctx context.Context, _ *mcp.CallToolRequest, 
 	return result, nil, nil
 }
 
-// getThreadList returns a formatted string of available threads, or empty string on error.
-func (ds *debuggerSession) getThreadList() string {
-	if ds.client == nil {
-		return ""
-	}
-	seq, err := ds.client.ThreadsRequest()
-	if err != nil {
-		return ""
-	}
-	resp, err := readTypedResponse[*dap.ThreadsResponse](ds.client, seq)
-	if err != nil {
-		return ""
-	}
-	var threads strings.Builder
-	for _, t := range resp.Body.Threads {
-		fmt.Fprintf(&threads, "  Thread %d: %s\n", t.Id, t.Name)
-	}
-	return threads.String()
-}
-
 // step executes a step command and returns the full context at the new location.
 func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, params StepParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -1283,142 +899,6 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
 			}, nil, nil
-		}
-	}
-}
-
-// getFullContext returns a complete context dump including location, stack trace, scopes, and variables.
-func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mcp.CallToolResult, error) {
-	if ds.client == nil {
-		return nil, fmt.Errorf("debugger not started")
-	}
-
-	var result strings.Builder
-
-	// Get stack trace
-	stSeq, err := ds.client.StackTraceRequest(threadID, 0, maxFrames)
-	if err != nil {
-		return nil, err
-	}
-	stResp, err := readTypedResponse[*dap.StackTraceResponse](ds.client, stSeq)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get stack trace: %w", err)
-	}
-	frames := stResp.Body.StackFrames
-
-	// Current location
-	if len(frames) > 0 {
-		top := frames[0]
-		result.WriteString("## Current Location\n")
-		fmt.Fprintf(&result, "Function: %s\n", top.Name)
-		if top.Source != nil {
-			fmt.Fprintf(&result, "File: %s:%d\n", top.Source.Path, top.Line)
-		}
-		result.WriteString("\n")
-	}
-
-	// Stack trace
-	result.WriteString("## Stack Trace\n")
-	for i, frame := range frames {
-		fmt.Fprintf(&result, "#%d (Frame ID: %d) %s", i, frame.Id, frame.Name)
-		if frame.Source != nil && frame.Source.Path != "" {
-			fmt.Fprintf(&result, " at %s:%d", frame.Source.Path, frame.Line)
-		}
-		if frame.InstructionPointerReference != "" {
-			fmt.Fprintf(&result, " [ip: %s]", frame.InstructionPointerReference)
-		}
-		if frame.PresentationHint == "subtle" {
-			result.WriteString(" (runtime)")
-		}
-		result.WriteString("\n")
-	}
-	result.WriteString("\n")
-
-	// Determine the target frame for scopes/variables
-	targetFrameID := frameID
-	if targetFrameID == 0 && len(frames) > 0 {
-		targetFrameID = frames[0].Id
-	}
-	ds.lastFrameID = targetFrameID
-
-	// Get scopes and variables
-	ds.writeScopesAndVariables(&result, targetFrameID)
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: result.String()}},
-	}, nil
-}
-
-// stopSummary extracts a compact stop message from a full context result,
-// showing just the current location and a prompt to call 'context'.
-func stopSummary(full *mcp.CallToolResult, reason string) *mcp.CallToolResult {
-	text := ""
-	if len(full.Content) > 0 {
-		if tc, ok := full.Content[0].(*mcp.TextContent); ok {
-			text = tc.Text
-		}
-	}
-	var summary strings.Builder
-	if reason != "" {
-		fmt.Fprintf(&summary, "Stopped: %s\n", reason)
-	}
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "Function:") || strings.HasPrefix(line, "File:") {
-			summary.WriteString(line + "\n")
-		}
-	}
-	summary.WriteString("Call 'context' to inspect stack trace and variables.")
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: summary.String()}},
-	}
-}
-
-// writeScopesAndVariables fetches scopes and their variables for the given
-// frame and writes them to the result builder. Errors are written inline
-// rather than propagated, since partial context is better than none.
-func (ds *debuggerSession) writeScopesAndVariables(result *strings.Builder, frameID int) {
-	scopesSeq, err := ds.client.ScopesRequest(frameID)
-	if err != nil {
-		result.WriteString("## Variables\n(unable to retrieve scopes)\n")
-		return
-	}
-
-	scopesResp, err := readTypedResponse[*dap.ScopesResponse](ds.client, scopesSeq)
-	if err != nil {
-		result.WriteString("## Variables\n(unable to retrieve scopes)\n")
-		return
-	}
-
-	scopes := scopesResp.Body.Scopes
-	if len(scopes) == 0 {
-		return
-	}
-
-	result.WriteString("## Variables\n")
-	for _, scope := range scopes {
-		if scope.Name == "Registers" {
-			continue
-		}
-		fmt.Fprintf(result, "### %s\n", scope.Name)
-		if scope.VariablesReference <= 0 {
-			continue
-		}
-		varSeq, err := ds.client.VariablesRequest(scope.VariablesReference)
-		if err != nil {
-			result.WriteString("  (unable to retrieve variables)\n")
-			continue
-		}
-		varResp, err := readTypedResponse[*dap.VariablesResponse](ds.client, varSeq)
-		if err != nil {
-			result.WriteString("  (unable to retrieve variables)\n")
-			continue
-		}
-		for _, v := range varResp.Body.Variables {
-			if v.Type != "" {
-				fmt.Fprintf(result, "  %s (%s) = %s\n", v.Name, v.Type, v.Value)
-			} else {
-				fmt.Fprintf(result, "  %s = %s\n", v.Name, v.Value)
-			}
 		}
 	}
 }

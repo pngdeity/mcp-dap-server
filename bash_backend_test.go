@@ -8,7 +8,7 @@ import (
 )
 
 func TestBashBackendLaunchArgs(t *testing.T) {
-	backend := &bashBackend{
+	backend := &bashdbBackend{
 		bashPath:   "/bin/bash",
 		catPath:    "cat",
 		mkfifoPath: "mkfifo",
@@ -81,7 +81,7 @@ func TestBashBackendLaunchArgs(t *testing.T) {
 }
 
 func TestBashBackendCoreArgsError(t *testing.T) {
-	backend := &bashBackend{}
+	backend := &bashdbBackend{}
 	_, err := backend.CoreArgs("/path/to/program", "/path/to/core")
 	if err == nil {
 		t.Fatal("expected error for core mode")
@@ -92,7 +92,7 @@ func TestBashBackendCoreArgsError(t *testing.T) {
 }
 
 func TestBashBackendAttachArgsError(t *testing.T) {
-	backend := &bashBackend{}
+	backend := &bashdbBackend{}
 	_, err := backend.AttachArgs(12345)
 	if err == nil {
 		t.Fatal("expected error for attach mode")
@@ -103,14 +103,14 @@ func TestBashBackendAttachArgsError(t *testing.T) {
 }
 
 func TestBashBackendAdapterID(t *testing.T) {
-	backend := &bashBackend{}
+	backend := &bashdbBackend{}
 	if backend.AdapterID() != "bashdb" {
 		t.Errorf("expected 'bashdb', got: %s", backend.AdapterID())
 	}
 }
 
 func TestBashBackendTransportMode(t *testing.T) {
-	backend := &bashBackend{}
+	backend := &bashdbBackend{}
 	if backend.TransportMode() != "stdio" {
 		t.Errorf("expected 'stdio', got: %s", backend.TransportMode())
 	}
@@ -126,7 +126,7 @@ func TestBashBackendSpawn(t *testing.T) {
 		t.Skip("vscode-bash-debug adapter not found")
 	}
 
-	backend := &bashBackend{adapterPath: adapterPath}
+	backend := &bashdbBackend{adapterPath: adapterPath}
 	cmd, listenAddr, err := backend.Spawn(":0", io.Discard)
 	if err != nil {
 		t.Fatalf("failed to spawn bash-debug-adapter: %v", err)

@@ -6,7 +6,7 @@ import (
 	"os/exec"
 )
 
-type bashBackend struct {
+type bashdbBackend struct {
 	nodePath    string
 	adapterPath string
 	bashPath    string
@@ -17,7 +17,7 @@ type bashBackend struct {
 	stdout      io.ReadCloser
 }
 
-func (b *bashBackend) Spawn(port string, stderrWriter io.Writer) (*exec.Cmd, string, error) {
+func (b *bashdbBackend) Spawn(port string, stderrWriter io.Writer) (*exec.Cmd, string, error) {
 	nodePath := b.nodePath
 	if nodePath == "" {
 		nodePath = "node"
@@ -49,15 +49,15 @@ func (b *bashBackend) Spawn(port string, stderrWriter io.Writer) (*exec.Cmd, str
 	return cmd, "", nil
 }
 
-func (b *bashBackend) TransportMode() string {
+func (b *bashdbBackend) TransportMode() string {
 	return "stdio"
 }
 
-func (b *bashBackend) AdapterID() string {
+func (b *bashdbBackend) AdapterID() string {
 	return "bashdb"
 }
 
-func (b *bashBackend) LaunchArgs(mode, programPath string, stopOnEntry bool, programArgs []string) (map[string]any, error) {
+func (b *bashdbBackend) LaunchArgs(mode, programPath string, stopOnEntry bool, programArgs []string) (map[string]any, error) {
 	if mode != "source" && mode != "binary" {
 		return nil, fmt.Errorf("unsupported launch mode for bash: %s (use 'source' or 'binary')", mode)
 	}
@@ -97,22 +97,22 @@ func (b *bashBackend) LaunchArgs(mode, programPath string, stopOnEntry bool, pro
 	return args, nil
 }
 
-func (b *bashBackend) CoreArgs(programPath, coreFilePath string) (map[string]any, error) {
+func (b *bashdbBackend) CoreArgs(programPath, coreFilePath string) (map[string]any, error) {
 	return nil, fmt.Errorf("bash backend does not support core dump debugging")
 }
 
-func (b *bashBackend) CoreRequestType() string {
+func (b *bashdbBackend) CoreRequestType() string {
 	return "launch"
 }
 
-func (b *bashBackend) AttachArgs(processID int) (map[string]any, error) {
+func (b *bashdbBackend) AttachArgs(processID int) (map[string]any, error) {
 	return nil, fmt.Errorf("bash backend does not support attach mode")
 }
 
-func (b *bashBackend) RestartArgs(args []string) (map[string]any, error) {
+func (b *bashdbBackend) RestartArgs(args []string) (map[string]any, error) {
 	return nil, nil
 }
 
-func (b *bashBackend) StdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser) {
+func (b *bashdbBackend) StdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser) {
 	return b.stdout, b.stdin
 }

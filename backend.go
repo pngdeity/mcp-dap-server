@@ -42,6 +42,10 @@ type DebuggerBackend interface {
 	// RestartArgs builds the debugger-specific arguments for a restart request.
 	// Returns nil, nil if the backend does not support restart.
 	RestartArgs(args []string) (map[string]any, error)
+
+	// StdioPipes returns the stdout and stdin pipes from Spawn for stdio-based
+	// transports. TCP-based backends return nil, nil.
+	StdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser)
 }
 
 // delveBackend implements DebuggerBackend for the Delve debugger (Go).
@@ -164,6 +168,11 @@ func (b *delveBackend) RestartArgs(args []string) (map[string]any, error) {
 	}, nil
 }
 
+// StdioPipes returns nil, nil — Delve uses TCP transport.
+func (b *delveBackend) StdioPipes() (io.ReadCloser, io.WriteCloser) {
+	return nil, nil
+}
+
 // gdbBackend implements DebuggerBackend for GDB's native DAP server.
 // Requires GDB 14+. Communicates over stdio.
 type gdbBackend struct {
@@ -219,8 +228,12 @@ func (g *gdbBackend) AdapterID() string {
 	return "gdb"
 }
 
+// RestartArgs returns nil — GDB's restart support varies; let the adapter use its defaults.
+func (g *gdbBackend) RestartArgs(args []string) (map[string]any, error) {
+	return nil, nil
+}
+
 // StdioPipes returns the captured stdout and stdin pipes from Spawn.
-// These are used to create a DAPClient over the stdio transport.
 func (g *gdbBackend) StdioPipes() (stdout io.ReadCloser, stdin io.WriteCloser) {
 	return g.stdout, g.stdin
 }
@@ -275,7 +288,52 @@ func (g *gdbBackend) AttachArgs(processID int) (map[string]any, error) {
 	}, nil
 }
 
-// RestartArgs returns nil — GDB's restart support varies; let the adapter use its defaults.
-func (g *gdbBackend) RestartArgs(args []string) (map[string]any, error) {
-	return nil, nil
+func defaultDebuggerFor(language string) string {
+	switch language {
+	case "go":
+		return "delve"
+	case "c", "cpp", "c++":
+		return "gdb"
+	case "bash", "sh":
+		return "bash"
+	}
+	return ""
+}
+
+func newBackend(params DebugParams) (DebuggerBackend, error) {
+	debugger := params.Debugger
+	if debugger == "" {
+		if params.Language != "" {
+			debugger = defaultDebuggerFor(params.Language)
+		}
+		if debugger == "" {
+			debugger = "delve"
+		}
+	}
+
+	switch debugger {
+	case "delve":
+		return &delveBackend{}, nil
+	case "bash":
+		return &bashdbBackend{
+			nodePath:    params.BashNodePath,
+			adapterPath: params.BashAdapterPath,
+			bashPath:    params.BashBashPath,
+			catPath:     params.BashCatPath,
+			mkfifoPath:  params.BashMkfifoPath,
+			pkillPath:   params.BashPkillPath,
+		}, nil
+	case "gdb":
+		gdbPath := params.GDBPath
+		if gdbPath == "" {
+			var err error
+			gdbPath, err = exec.LookPath("gdb")
+			if err != nil {
+				return nil, fmt.Errorf("GDB not found in PATH. Install GDB 14+ or set the gdbPath parameter")
+			}
+		}
+		return &gdbBackend{gdbPath: gdbPath, toolLogPath: params.ToolLog}, nil
+	default:
+		return nil, fmt.Errorf("unsupported debugger: %s (must be 'delve', 'gdb', or 'bash')", debugger)
+	}
 }
