@@ -4,13 +4,13 @@ This document provides guidance for choosing and executing the right debugging w
 
 ## Quick Decision Table
 
-| Scenario | Mode | Debugger | Tool / Prompt |
-|----------|------|----------|---------------|
-| Debug Go source code | `source` | `delve` | `debug-source` prompt / skill |
-| Debug C/C++ source code | `binary`* | `gdb` | `debug-source` prompt / skill |
-| Attach to running process | `attach` | `delve` or `gdb` | `debug-attach` prompt / skill |
-| Analyze a crash (core dump) | `core` | `delve` or `gdb` | `debug-core-dump` prompt / skill |
-| Debug a compiled binary | `binary` | `delve` or `gdb` | `debug-binary` prompt / skill |
+| Scenario | Mode | Debugger | Prompt |
+|----------|------|----------|--------|
+| Debug Go source code | `source` | `delve` | `debug-source` |
+| Debug C/C++ source code | `binary`* | `gdb` | `debug-source` |
+| Attach to running process | `attach` | `delve` or `gdb` | `debug-attach` |
+| Analyze a crash (core dump) | `core` | `delve` or `gdb` | `debug-core-dump` |
+| Debug a compiled binary | `binary` | `delve` or `gdb` | `debug-binary` |
 
 *GDB does not support compiling from source — compile with `gcc -g -O0` first.
 
@@ -199,13 +199,4 @@ To use a prompt from an MCP client:
 prompts/get debug-core-dump {"binary_path": "/usr/bin/myapp", "core_path": "/tmp/core.12345"}
 ```
 
-## Claude Code Skills
-
-If using Claude Code with the `mcp-dap-server` skills configured, invoke the appropriate skill:
-
-- `/debug-source` — live source debugging workflow
-- `/debug-attach` — live process attach workflow
-- `/debug-core-dump` — post-mortem core dump analysis
-- `/debug-binary` — assembly-level binary debugging
-
-Skills are located in `skills/` and provide the same workflow guidance with additional AI-specific decision trees and interpretation hints.
+Workflow guidance is provided by MCP prompts (see above). The `debug` tool also accepts a `language` parameter to auto-select the appropriate debugger backend.

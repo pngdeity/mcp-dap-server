@@ -272,22 +272,9 @@ The server exposes 4 prompts (via `prompts/list` and `prompts/get`) that return 
 
 Prompts are registered in `prompts.go` via `registerPrompts()`, called from `main.go`. The `debug-source` prompt accepts an optional `language` parameter to select the appropriate debugger.
 
-### Claude Code Skills
-
-Four skills live in `skills/` for use with the Claude Code Superpowers plugin:
-
-| Skill file | Trigger |
-|-----------|---------|
-| `debug-source.md` | Debugging from source code |
-| `debug-attach.md` | Attaching to a running process |
-| `debug-core-dump.md` | Analyzing a core dump |
-| `debug-binary.md` | Assembly-level binary debugging |
-
-To register skills with Claude Code, configure the `skills/` directory as a skills source in your Superpowers plugin settings.
-
 ### Human Reference
 
 See `docs/debugging-workflows.md` for:
-- Decision table: scenario → mode → which prompt/skill to use
+- Decision table: scenario → mode → which prompt to use
 - Mermaid workflow diagrams for each scenario
 - Common gotchas and patterns per scenario
