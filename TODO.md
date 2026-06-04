@@ -252,3 +252,90 @@ loadServerConfig() ──→ registerTools(cfg)
 
 - `ARCHITECTURE_REVIEW.md` — full architecture assessment
 - `PROTOCOL_COVERAGE.md` — DAP and MCP protocol coverage analysis
+
+---
+
+## Interface Contract Improvements
+
+Architectural evaluation of the three core contracts. See `docs/architecture.md` for context.
+
+## `DebuggerBackend` (`backend.go:15`)
+
+### Transport modality leaks through `Spawn()`
+
+| Issue | Detail |
+|-------|--------|
+| `listenAddr string` return | TCP-only data. Stdio backends return `""`. Caller must know transport type to interpret. |
+| `port string` parameter | Dead weight for 2 of 3 implementations (gdb, bashdb ignore it). |
+| `TransportMode()` string discriminator | Callers branch on `"tcp"` vs `"stdio"` — the interface failed to abstract transport. |
+
+**Target**: Replace `Spawn(port, stderrWriter) (cmd, listenAddr, err)` with `Spawn(stderrWriter) (io.ReadWriteCloser, error)`. TCP backends return `net.Conn`; stdio backends return pipe adapter. Port/listen logic becomes an internal detail of `delveBackend`. Eliminate `TransportMode()` and `StdioPipes()`.
+
+### Temporal coupling in `StdioPipes()`
+
+`Spawn()` mutates the backend struct (`g.stdin = stdin`), then `StdioPipes()` returns those values. Nothing enforces call ordering — calling `StdioPipes()` before `Spawn()` silently returns nil pipes. Fixed if merged into the `Spawn()` return above.
+
+### `CoreRequestType()` exposes DAP protocol inconsistency
+
+Delve uses `"launch"` for core dumps, GDB uses `"attach"`. This protocol quirk bubbles through the abstraction and forces `tools.go` to pick DAP request types — a layer violation. **Target**: Move the launch-vs-attach decision into each backend's `Spawn`/connect flow, or collapse into a single `debugCoreDump(programPath, coreFilePath)` method that backends implement opaquely.
+
+### `map[string]any` erases type safety on 4 methods
+
+`LaunchArgs`, `CoreArgs`, `AttachArgs`, `RestartArgs` all return `map[string]any`. No compile-time key validation. A typo silently produces wrong DAP messages. **Target**: Keep `map[string]any` (DAP demands runtime-flexible args) but add a `Validate() error` pass before serialization, or define a `DAPArguments` type with typed builder methods.
+
+### Interface too large for supported modes
+
+10 methods. `bashdbBackend` returns errors for `CoreArgs`, `AttachArgs`. Splitting into capability interfaces (`Launcher`, `Attacher`, `CoreDumper`) would let backends implement only what they support, with the factory reporting capabilities to callers.
+
+### No resource lifecycle contract
+
+`Spawn()` returns `*exec.Cmd`. Who calls `cmd.Wait()`? `debuggerSession.cleanup()` does, but nothing enforces this. If `ds.cmd` is reassigned before the old cmd is waited, we leak a zombie process. **Target**: Backends own the lifecycle — add a `Close()` method to the interface.
+
+## `DAPClient` (`dap.go:25`)
+
+### No interface — concrete type welded to all consumers
+
+Every function in `tools.go` and `session.go` takes `*DAPClient` directly. Consequences: no mocking for isolation tests, no alternative transport implementations (WebSocket, in-process), every consumer must change to add a new client.
+
+### Send and receive split across layers
+
+Client methods return `(seq int, err error)`. Response matching logic (`readAndValidateResponse`, `readTypedResponse`) lives in `tools.go`. Nothing enforces that callers use the seq correctly. **Target**: Pair send+receive in the client (e.g. `ContinueRequest → (StoppedEvent, error)`) or define a `ResponseWaiter` type returned by send methods.
+
+### `InitializeRequest` is the anomaly
+
+Only request method that reads its own response (calls `ReadMessage()` internally). Every other method just sends. The pattern is identical (send → match response by seq), so the inconsistency is architecturally unmotivated.
+
+### No thread-safety guarantees
+
+`rwc`, `seq`, `logWriter` are mutable and unsynchronized. Only the external `debuggerSession.mu` makes access safe. The invariant lives outside the client. **Target**: Either document that the client is not thread-safe (caller must serialize) or add internal synchronization.
+
+### `Close()` not idempotent
+
+Calling `Close()` on a closed TCP connection panics. `debuggerSession.cleanup()` guards with `ds.client == nil`, but the guard is at the wrong layer.
+
+## `debuggerSession` (`session.go:16`)
+
+### 12 mutable fields with undocumented dependencies
+
+- `stoppedThreadID` must be set before `defaultThreadID()` returns meaningfully
+- `lastFrameID` uses sentinel `-1` for "unset"
+- `client == nil` conflates three states: never started, cleanly stopped, crashed
+
+### Dynamic tool registration invisible to MCP clients
+
+Tool listings differ depending on session state. No way to query "is a session active?" except by trying a call and watching it fail. **Target**: Export a `session-state` tool (always registered) that reports status, or use MCP server prompts to expose session metadata.
+
+### `registerSessionTools()` not idempotent
+
+Calling twice without `unregisterSessionTools()` between causes silent state drift because `RemoveTools("debug")` on the second call drops the first registration.
+
+## Implementation Order
+
+| Priority | Change | Reason |
+|----------|--------|--------|
+| 1 | Extract `DAPClient` interface | Unblocks mock-based unit testing for all tool handlers |
+| 2 | Merge transport into `Spawn()` return | Eliminates `TransportMode()` + `StdioPipes()` + `port` parameter — 3 methods collapse into 1 |
+| 3 | Pair send+receive in DAPClient | Moves seq-matching responsibility from tools.go into the client |
+| 4 | Split `DebuggerBackend` by capability | Let backends implement only modes they support |
+| 5 | Add `Close()` to `DebuggerBackend` | Formalize resource lifecycle |
+| 6 | Export session state tool | Make session status queryable by MCP clients |
