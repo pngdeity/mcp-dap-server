@@ -40,7 +40,7 @@ The MCP DAP Server acts as a bridge between MCP clients and DAP-compatible debug
 ### Building from Source
 
 ```bash
-git clone https://github.com/go-delve/mcp-dap-server
+git clone https://github.com/pngdeity/mcp-dap-server
 cd mcp-dap-server
 go build -o bin/mcp-dap-server
 ```
