@@ -339,3 +339,361 @@ Calling twice without `unregisterSessionTools()` between causes silent state dri
 | 4 | Split `DebuggerBackend` by capability | Let backends implement only modes they support |
 | 5 | Add `Close()` to `DebuggerBackend` | Formalize resource lifecycle |
 | 6 | Export session state tool | Make session status queryable by MCP clients |
+
+---
+
+## Exception Breakpoints (setExceptionBreakpoints + exception-info)
+
+### Functional Requirements
+
+1. AI can request that the debugger stop on specific exception types (Go panics, C++
+   exceptions, etc.) by passing `exceptionFilters` in the `debug` tool call.
+2. AI can inspect exception details (exception ID, description, break mode, exception
+   type name, inner exceptions) when stopped at an exception via a new
+   `exception-info` tool.
+3. The `info` tool can list available exception filter names from the adapter.
+4. Tools are capability-gated: only register when the adapter reports
+   `ExceptionBreakpointFilters` in `InitializeResponse.Body`.
+
+### Implementation Details
+
+**New DAP request methods** (`dap.go`):
+
+- `SetExceptionBreakpointsRequest(filters []string) (int, error)` — raw JSON
+  construction (go-dap v0.12.0 lacks `SetExceptionBreakpointsRequest` type).
+- `ExceptionInfoRequest(threadID int) (int, error)` — raw JSON construction (go-dap
+  v0.12.0 lacks `ExceptionInfoRequest` type).
+
+**Parameter changes** (`params.go`):
+
+- `DebugParams.ExceptionFilters []string` — exception breakpoint filter names to
+  enable. E.g. `"panic"` (Go/Delve), `"cpp_throw"` (C++/GDB).
+- New `ExceptionInfoParams` struct with `ThreadID FlexInt`.
+
+**Session lifecycle** (`session.go`):
+
+- `registerSessionTools()`: gated on `len(ds.capabilities.ExceptionBreakpointFilters) > 0`.
+- `sessionToolNames()`: add `"exception-info"` when filters exist.
+- `info` tool description dynamic extension for `"exception-filters"` type.
+
+**Tool handler** (`tools.go`):
+
+- New `exceptionInfo()` handler — sends `ExceptionInfoRequest`, formats
+  `ExceptionInfoResponse` (exception ID, description, break mode, details).
+- `configureSession()`: after breakpoints, send `setExceptionBreakpoints` with
+  `params.ExceptionFilters` before `configurationDone`.
+- `info()`: add `case "exception-filters"` to list available filters from
+  `ds.capabilities.ExceptionBreakpointFilters`.
+
+**Capability gating**: go-dap v0.12.0 includes `ExceptionBreakpointFilters` in
+the `Capabilities` struct. All exception-related DAP types
+(`SetExceptionBreakpointsRequest`, `ExceptionInfoRequest`,
+`ExceptionBreakpointsFilter`, `ExceptionBreakMode`, `ExceptionDetails`,
+`ExceptionFilterOptions`, `ExceptionOptions`, `ExceptionPathSegment`) are present
+and usable directly — no raw JSON workarounds needed.
+
+### Upstream SDK Investigation — Complete
+
+Investigation date: 2026-06-09. **Result: No upstream PR needed.** Verified via
+`go doc` that go-dap v0.12.0 contains every exception-related DAP type listed
+above. An initial search of the module cache returned empty results due to a
+stale cache, but `go doc` confirmed all types are present. Implementation can
+proceed with typed go-dap structs — no raw JSON workarounds needed.
+
+Full inventory in `handoff_go_dap_exception_types.md`.
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] `SetExceptionBreakpointsRequest` compiles with typed go-dap structs
+- [ ] `exception-info` tool listed in MCP tools/list when adapter has exception filters
+- [ ] `exception-info` tool NOT listed when adapter has no exception filters
+- [ ] `debug(mode="source", exceptionFilters=["panic"])` sets exception breakpoints
+- [ ] `exception-info` returns structured exception data after a panic stop
+- [ ] `info(type="exception-filters")` lists available filters
+- [ ] Response matching via `readTypedResponse` works for both new request types
+
+---
+
+## Read Timeouts and Cancellation
+
+### Problem
+
+All DAP response-reading loops (`continueExecution`, `step`, `handleFirstStop`,
+`waitForInitialized`, `readAndValidateResponse`, `readTypedResponse`) call
+`client.ReadMessage()` in unbounded `for {}` loops. If the DAP adapter crashes,
+hangs, or stops responding mid-session, the tool call blocks indefinitely,
+holding the `debuggerSession` mutex and freezing all further operations.
+
+The go-sdk v1.6.1 passes `context.Context` to every tool handler, and the MCP
+transport supports `notifications/cancelled`. Both are available but not wired
+to DAP reads.
+
+### Target
+
+1. **Add context-aware read to `DAPClient`**: a `ReadMessageWithContext(ctx)`
+   method that uses a goroutine + `select` on `ctx.Done()` to return an error
+   when the context is cancelled. Existing `ReadMessage()` remains for backward
+   compatibility; callers inside event-waiting loops switch to the context-aware
+   variant.
+
+2. **Wire the `ctx` parameter from tool handlers**: All tool handlers already
+   receive `ctx context.Context` as their first parameter — the context is
+   simply ignored during DAP reads. Pass it through.
+
+3. **Send `cancel` DAP request on timeout**: If the context is cancelled (the
+   MCP client sent `notifications/cancelled`), send a DAP `cancel` request with
+   the in-flight request's sequence number before returning. Gate on
+   `capabilities.SupportsCancelRequest`.
+
+4. **Add a `readTimeout` constant**: Default 30 seconds for tool calls. The
+   context is wrapped with `context.WithTimeout` to prevent indefinite hangs
+   even if the MCP client doesn't cancel.
+
+### Files
+
+- `dap.go` — new `ReadMessageWithContext(ctx) (dap.Message, error)` method
+- `dap.go` — new `CancelRequest(requestId int) (int, error)` method (raw JSON,
+  go-dap v0.12.0 lacks the type)
+- `tools.go` — replace `client.ReadMessage()` with `client.ReadMessageWithContext(ctx)`
+  in all event-waiting loops
+- `session.go` — same for `readAndValidateResponse`, `readTypedResponse`
+  (thread context through or accept a `ctx` parameter)
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] Tool call with active context returns `context.Canceled` error when cancelled
+- [ ] `cancel` DAP request sent when `SupportsCancelRequest` is true
+- [ ] No regressions in normal (non-cancelled) execution
+- [ ] Timeout fires and releases mutex when adapter hangs
+
+---
+
+## StoppedEvent Wire Leak
+
+### Problem
+
+When `debug()` is called with `stopOnEntry: true` or no breakpoints, the
+`handleFirstStop()` function at `tools.go:795` consumes one `StoppedEvent` but
+may leave a second one on the wire. The comment at the stop-on-entry return
+path notes: "The StoppedEvent from the adapter (if any) will be consumed by the
+next readTypedResponse call, which skips EventMessages."
+
+This is correct for `readTypedResponse` (which skips events) but NOT for
+event-waiting loops like `continueExecution` or `step`. A leftover
+`StoppedEvent` consumed by `continueExecution`'s loop causes `getFullContext`
+to run, producing a spurious stop summary when the user only asked to continue.
+
+### Affected code paths
+
+`tools.go`:
+- `handleFirstStop()` — the stop-on-entry early-return path (reads one
+  StoppedEvent, drains none after)
+- `handleFirstStop()` — the entry→auto-continue→breakpoint path (loops until
+  non-"entry" StoppedEvent, but entry events from other threads could arrive)
+
+### Target
+
+After consuming the intended `StoppedEvent` in `handleFirstStop()`, drain any
+remaining events from the wire before returning. Use a non-blocking read with
+a short timeout:
+
+```go
+// Drain any leftover StoppedEvents before returning.
+for {
+    msg, err := ds.client.ReadMessage()
+    if err != nil { break }
+    if _, ok := msg.(*dap.StoppedEvent); !ok { break }
+}
+```
+
+A cleaner approach: `DAPClient` provides a `DrainEvents()` method that reads
+all available messages and discards events, returning any pending response.
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] `debug(mode="source", stopOnEntry=true)` followed by `continue()` does not
+  produce a spurious stop
+- [ ] Existing tests pass unchanged
+
+---
+
+## Response Reader Robustness
+
+### Problem
+
+`readAndValidateResponse` (`tools.go:18`) and `readTypedResponse[T]`
+(`tools.go:51`) have `switch msg.(type)` blocks with `case dap.ResponseMessage:`
+and `case dap.EventMessage:` but no `default:` arm. If go-dap ever introduces
+a new `dap.Message` type (or returns `nil`), the loop silently continues
+forever — an infinite busy loop holding the mutex.
+
+### Target
+
+Add a `default:` case to both readers that logs the unexpected type and
+continues:
+
+```go
+default:
+    log.Printf("readAndValidateResponse: unexpected message type %T (request_seq=%d)", msg, requestSeq)
+    continue
+```
+
+### Files
+
+- `tools.go` — `readAndValidateResponse` (line 38)
+- `tools.go` — `readTypedResponse[T]` (line 84)
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] `go vet ./...` clean
+- [ ] No behavioral change for known message types
+
+---
+
+## Protocol Logging Redundancy
+
+### Problem
+
+`send()` at `dap.go:125` logs `SENT` messages when `c.logWriter` is set.
+`EvaluateRequest` at `dap.go:266` has its own inline logging because it
+constructs messages as raw JSON (`map[string]any`) rather than using go-dap
+typed structs. The log format strings are identical (`"SENT: <<<%s>>>\n"`),
+but if the format changes, it must be updated in two places.
+
+### Target
+
+Refactor `EvaluateRequest` to use `send()` by constructing the message
+differently, or extract a shared `logSend(data)` helper that both paths call.
+
+### Files
+
+- `dap.go` — `send()` and `EvaluateRequest`
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] Protocol logging produces identical output before and after
+
+---
+
+## Error Handling and Diagnostics Polish
+
+### flexint format string
+
+`flexint.go:31` — `fmt.Errorf("cannot unmarshal %q as integer", string(data))`.
+When `data` is `[]byte(`"abc"`)`, this produces:
+`cannot unmarshal "\"abc\"" as integer`. The `%q` adds an extra layer of quotes
+around the already-quoted raw JSON bytes.
+
+**Fix**: Change to `%s` for raw bytes, or trim quotes from the input first.
+
+### getThreadList error swallowing
+
+`session.go:211-228` — both `ThreadsRequest()` and `readTypedResponse` error
+paths return empty string with no logging. When `context()` appends the empty
+string to an error message, the result is `"<original error>\n\nAvailable
+threads...\n"` with no actual thread list.
+
+**Fix**: Log failures at debug level. Return a descriptive error string instead
+of empty string.
+
+### Files
+
+- `flexint.go` — format string fix
+- `session.go` — `getThreadList()` logging
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] FlexInt error message is readable (no extra quote escaping)
+- [ ] Thread errors produce useful debug logs
+
+---
+
+## MCP Integration Improvements
+
+### MCP Logging
+
+The go-sdk auto-advertises the `logging` capability but `ss.Log()` is never
+called. Use it for session lifecycle events:
+
+```
+ss.Log(ctx, &mcp.LogParams{Level: "notice", Data: "Debug session started: mode=source, path=main.go"})
+ss.Log(ctx, &mcp.LogParams{Level: "notice", Data: "Breakpoint hit: main.go:42"})
+ss.Log(ctx, &mcp.LogParams{Level: "warning", Data: "Debug session terminated unexpectedly"})
+```
+
+If the logging capability should not be advertised, set
+`ServerOptions.Capabilities.Logging` to nil in `main.go`.
+
+### MCP Progress Reporting
+
+Long operations (debug adapter spawn, wait-for-breakpoint) can take several
+seconds. Use `ss.NotifyProgress()` with progress tokens when the MCP client
+provides them in the `_meta.progressToken` field.
+
+Requires the client to include `_meta.progressToken` in the tool call — the
+go-sdk handles token routing automatically for `Tools: { listChanged: true }`.
+
+### setExpression Tool
+
+More natural for AI interaction than `set-variable` — the AI can say "set x to
+42" directly via `evaluate("x = 42", context="repl")` rather than needing a
+`variablesReference` from a prior `context` call.
+
+**Gating**: `capabilities.SupportsSetExpression`.
+**Params**: `SetExpressionParams{Expression string, Value string, FrameId FlexInt}`.
+**Tool name**: `set-expression`.
+
+### Step Granularity
+
+The `step` tool accepts `mode: "over"/"in"/"out"`. Extend with an optional
+`granularity` parameter:
+
+```go
+type StepParams struct {
+    Mode        string  // existing
+    Granularity string  // NEW: "statement" (default) or "instruction"
+    ...
+}
+```
+
+Passes `granularity` to the `next`/`stepIn`/`stepOut` DAP requests.
+**Gating**: `capabilities.SupportsSteppingGranularity`.
+
+### VariablePresentationHint
+
+The `Variable` type from go-dap has `PresentationHint` with fields `Kind`
+("class", "interface", "method", "property", "data", "virtual"), `Attributes`
+("static", "constant", "readOnly"), and `Visibility` ("public", "private").
+This metadata is available in DAP responses but not surfaced in
+`writeScopesAndVariables()`.
+
+Include variable hints in the formatted output:
+
+```
+  count (int) = 42 [static]
+  handler (Handler) = {Method: processRequest} [public method]
+```
+
+**No new tool** — purely a formatting change in `session.go:writeScopesAndVariables`.
+
+### Files
+
+- `session.go` — `writeScopesAndVariables()` hint formatting
+- `tools.go` — optional progress tokens in long operations
+- `params.go` — `SetExpressionParams`, `StepParams.Granularity`
+- `main.go` — logging capability configuration
+- `dap.go` — `SetExpressionRequest` method (raw JSON, go-dap may lack the type)
+
+### Verification
+
+- [ ] `go build ./...` succeeds
+- [ ] MCP logging events appear when server is connected
+- [ ] `set-expression` tool appears in tools/list when adapter supports it
+- [ ] `step(granularity="instruction")` sends correct DAP request
+- [ ] Variable hints appear in `context()` output
