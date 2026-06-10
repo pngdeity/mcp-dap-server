@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/pngdeity/mcp-dap-server/debugadapters"
 )
 
 // readAndValidateResponse reads DAP messages until it receives the response
@@ -582,7 +584,7 @@ func (ds *debuggerSession) validateDebugParams(params DebugParams) (port, mode s
 	}
 
 	if mode == "core" && params.Path == "" {
-		if _, isGDB := ds.backend.(*gdbBackend); !isGDB {
+		if _, isGDB := ds.backend.(*debugadapters.GDBBackend); !isGDB {
 			return "", "", fmt.Errorf("path is required for core mode with this debugger (only GDB can auto-detect the executable from a core file)")
 		}
 	}

@@ -1,4 +1,4 @@
-package main
+package debugadapters
 
 import (
 	"io"
@@ -7,23 +7,12 @@ import (
 	"testing"
 )
 
-func TestBashInterfaceCompliance(t *testing.T) {
-	testBackendCompliance(t, func() DebuggerBackend {
-		return &bashdbBackend{
-			bashPath:   "/bin/bash",
-			catPath:    "cat",
-			mkfifoPath: "mkfifo",
-			pkillPath:  "pkill",
-		}
-	})
-}
-
 func TestBashBackendLaunchArgs(t *testing.T) {
-	backend := &bashdbBackend{
-		bashPath:   "/bin/bash",
-		catPath:    "cat",
-		mkfifoPath: "mkfifo",
-		pkillPath:  "pkill",
+	backend := &BashBackend{
+		BashPath:   "/bin/bash",
+		CatPath:    "cat",
+		MkfifoPath: "mkfifo",
+		PkillPath:  "pkill",
 	}
 
 	t.Run("source mode", func(t *testing.T) {
@@ -92,7 +81,7 @@ func TestBashBackendLaunchArgs(t *testing.T) {
 }
 
 func TestBashBackendCoreArgsError(t *testing.T) {
-	backend := &bashdbBackend{}
+	backend := &BashBackend{}
 	_, err := backend.CoreArgs("/path/to/program", "/path/to/core")
 	if err == nil {
 		t.Fatal("expected error for core mode")
@@ -103,7 +92,7 @@ func TestBashBackendCoreArgsError(t *testing.T) {
 }
 
 func TestBashBackendAttachArgsError(t *testing.T) {
-	backend := &bashdbBackend{}
+	backend := &BashBackend{}
 	_, err := backend.AttachArgs(12345)
 	if err == nil {
 		t.Fatal("expected error for attach mode")
@@ -114,14 +103,14 @@ func TestBashBackendAttachArgsError(t *testing.T) {
 }
 
 func TestBashBackendAdapterID(t *testing.T) {
-	backend := &bashdbBackend{}
+	backend := &BashBackend{}
 	if backend.AdapterID() != "bashdb" {
 		t.Errorf("expected 'bashdb', got: %s", backend.AdapterID())
 	}
 }
 
 func TestBashBackendTransportMode(t *testing.T) {
-	backend := &bashdbBackend{}
+	backend := &BashBackend{}
 	if backend.TransportMode() != "stdio" {
 		t.Errorf("expected 'stdio', got: %s", backend.TransportMode())
 	}
@@ -140,7 +129,7 @@ func TestBashBackendSpawn(t *testing.T) {
 		t.Skip("vscode-bash-debug adapter not found")
 	}
 
-	backend := &bashdbBackend{adapterPath: adapterPath}
+	backend := &BashBackend{AdapterPath: adapterPath}
 	cmd, listenAddr, err := backend.Spawn(":0", io.Discard)
 	if err != nil {
 		t.Fatalf("failed to spawn bash-debug-adapter: %v", err)

@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/pngdeity/mcp-dap-server/debugadapters"
 )
 
 type debuggerSession struct {
@@ -19,7 +21,7 @@ type debuggerSession struct {
 	client          *DAPClient
 	server          *mcp.Server
 	logWriter       io.Writer
-	backend         DebuggerBackend
+	backend         debugadapters.DebuggerBackend
 	capabilities    dap.Capabilities
 	launchMode      string
 	programPath     string
