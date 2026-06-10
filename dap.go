@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,22 +18,51 @@ type readWriteCloser struct {
 	io.WriteCloser
 }
 
-// DAPClient is a synchronous Debug Adapter Protocol client.
+// DAPClient is the interface for communicating with a Debug Adapter Protocol server.
+type DAPClient interface {
+	Close()
+	SetProtocolLogger(w io.Writer)
+	ReadMessage() (dap.Message, error)
+	ReadMessageWithContext(ctx context.Context) (dap.Message, error)
+	InitializeRequest(ctx context.Context, adapterID string) (dap.Capabilities, error)
+	LaunchRequest(arguments json.RawMessage) (int, error)
+	AttachRequest(arguments json.RawMessage) (int, error)
+	SetBreakpointsRequest(file string, lines []int) (int, error)
+	SetFunctionBreakpointsRequest(functions []string) (int, error)
+	ConfigurationDoneRequest() (int, error)
+	ContinueRequest(threadID int) (int, error)
+	NextRequest(threadID int) (int, error)
+	StepInRequest(threadID int) (int, error)
+	StepOutRequest(threadID int) (int, error)
+	PauseRequest(threadID int) (int, error)
+	ThreadsRequest() (int, error)
+	StackTraceRequest(threadID, startFrame, levels int) (int, error)
+	ScopesRequest(frameID int) (int, error)
+	VariablesRequest(variablesReference int) (int, error)
+	EvaluateRequest(expression string, frameID int, context string) (int, error)
+	DisconnectRequest(terminateDebuggee bool) (int, error)
+	SetVariableRequest(variablesRef int, name, value string) (int, error)
+	RestartRequest(arguments map[string]any) (int, error)
+	LoadedSourcesRequest() (int, error)
+	ModulesRequest() (int, error)
+	DisassembleRequest(memoryReference string, instructionOffset, instructionCount int) (int, error)
+	CancelRequest(requestId int) (int, error)
+}
+
+// dapClient is a synchronous Debug Adapter Protocol client.
 // It manages a connection to a DAP server and provides methods for
 // sending each DAP request type. Each request method returns the
 // sequence number of the sent request, which callers use to match
 // the corresponding response via request_seq.
-type DAPClient struct {
+type dapClient struct {
 	rwc       io.ReadWriteCloser
 	reader    *bufio.Reader
 	logWriter io.Writer
-	// seq tracks the sequence number for each request sent to the server.
-	seq int
+	seq       int
 }
 
 // newDAPClient creates a new Client over a TCP connection.
-// Call Close to close the connection.
-func newDAPClient(addr string) (*DAPClient, error) {
+func newDAPClient(addr string) (*dapClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to DAP server at %s: %w", addr, err)
@@ -41,27 +71,23 @@ func newDAPClient(addr string) (*DAPClient, error) {
 }
 
 // newDAPClientFromRWC creates a new Client with the given ReadWriteCloser.
-// Call Close to close the underlying transport.
-func newDAPClientFromRWC(rwc io.ReadWriteCloser) *DAPClient {
-	return &DAPClient{
+func newDAPClientFromRWC(rwc io.ReadWriteCloser) *dapClient {
+	return &dapClient{
 		rwc:    rwc,
 		reader: bufio.NewReader(rwc),
-		seq:    1, // match VS Code numbering
+		seq:    1,
 	}
 }
 
-// Close closes the client connection.
-func (c *DAPClient) Close() {
+func (c *dapClient) Close() {
 	c.rwc.Close()
 }
 
-// SetProtocolLogger sets a writer for logging all DAP messages sent and received.
-func (c *DAPClient) SetProtocolLogger(w io.Writer) {
+func (c *dapClient) SetProtocolLogger(w io.Writer) {
 	c.logWriter = w
 }
 
-// InitializeRequest sends an 'initialize' request and returns the server's capabilities.
-func (c *DAPClient) InitializeRequest(adapterID string) (dap.Capabilities, error) {
+func (c *dapClient) InitializeRequest(ctx context.Context, adapterID string) (dap.Capabilities, error) {
 	req := c.newRequest("initialize")
 	request := &dap.InitializeRequest{Request: *req}
 	request.Arguments = dap.InitializeRequestArguments{
@@ -78,7 +104,7 @@ func (c *DAPClient) InitializeRequest(adapterID string) (dap.Capabilities, error
 		return dap.Capabilities{}, err
 	}
 	for {
-		msg, err := c.ReadMessage()
+		msg, err := c.ReadMessageWithContext(ctx)
 		if err != nil {
 			return dap.Capabilities{}, err
 		}
@@ -89,7 +115,6 @@ func (c *DAPClient) InitializeRequest(adapterID string) (dap.Capabilities, error
 			}
 			return resp.Body, nil
 		case dap.EventMessage:
-			// Skip events (e.g. OutputEvent) during initialization and keep reading
 			continue
 		default:
 			return dap.Capabilities{}, fmt.Errorf("expected InitializeResponse, got %T", msg)
@@ -97,7 +122,7 @@ func (c *DAPClient) InitializeRequest(adapterID string) (dap.Capabilities, error
 	}
 }
 
-func (c *DAPClient) ReadMessage() (dap.Message, error) {
+func (c *dapClient) ReadMessage() (dap.Message, error) {
 	msg, err := dap.ReadProtocolMessage(c.reader)
 	if err != nil {
 		return nil, err
@@ -110,10 +135,25 @@ func (c *DAPClient) ReadMessage() (dap.Message, error) {
 	return msg, nil
 }
 
-// newRequest creates a new DAP request with the given command and an
-// auto-incremented sequence number. The caller can read the assigned
-// sequence number from the returned request's Seq field.
-func (c *DAPClient) newRequest(command string) *dap.Request {
+func (c *dapClient) ReadMessageWithContext(ctx context.Context) (dap.Message, error) {
+	type result struct {
+		msg dap.Message
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		msg, err := c.ReadMessage()
+		ch <- result{msg, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		return r.msg, r.err
+	}
+}
+
+func (c *dapClient) newRequest(command string) *dap.Request {
 	request := &dap.Request{}
 	request.Type = "request"
 	request.Command = command
@@ -122,14 +162,13 @@ func (c *DAPClient) newRequest(command string) *dap.Request {
 	return request
 }
 
-// logSend logs a marshaled message at SENT level if a protocol logger is configured.
-func (c *DAPClient) logSend(data []byte) {
+func (c *dapClient) logSend(data []byte) {
 	if c.logWriter != nil {
 		fmt.Fprintf(c.logWriter, "SENT: <<<%s>>>\n", data)
 	}
 }
 
-func (c *DAPClient) send(request dap.Message) error {
+func (c *dapClient) send(request dap.Message) error {
 	if data, err := json.Marshal(request); err == nil {
 		c.logSend(data)
 	}
@@ -141,8 +180,36 @@ func toRawMessage(in any) json.RawMessage {
 	return out
 }
 
-// SetBreakpointsRequest sends a 'setBreakpoints' request.
-func (c *DAPClient) SetBreakpointsRequest(file string, lines []int) (int, error) {
+func (c *dapClient) LaunchRequest(arguments json.RawMessage) (int, error) {
+	req := c.newRequest("launch")
+	request := &dap.LaunchRequest{Request: *req}
+	request.Arguments = arguments
+	return req.Seq, c.send(request)
+}
+
+func (c *dapClient) AttachRequest(arguments json.RawMessage) (int, error) {
+	req := c.newRequest("attach")
+	request := &dap.AttachRequest{Request: *req}
+	request.Arguments = arguments
+	return req.Seq, c.send(request)
+}
+
+func (c *dapClient) CancelRequest(requestId int) (int, error) {
+	req := c.newRequest("cancel")
+	args := map[string]any{
+		"requestId": requestId,
+	}
+	msg := struct {
+		dap.Request
+		Arguments map[string]any `json:"arguments"`
+	}{Request: *req, Arguments: args}
+	if data, err := json.Marshal(&msg); err == nil {
+		c.logSend(data)
+	}
+	return req.Seq, dap.WriteProtocolMessage(c.rwc, &msg)
+}
+
+func (c *dapClient) SetBreakpointsRequest(file string, lines []int) (int, error) {
 	req := c.newRequest("setBreakpoints")
 	request := &dap.SetBreakpointsRequest{Request: *req}
 	request.Arguments = dap.SetBreakpointsArguments{
@@ -158,8 +225,7 @@ func (c *DAPClient) SetBreakpointsRequest(file string, lines []int) (int, error)
 	return req.Seq, c.send(request)
 }
 
-// SetFunctionBreakpointsRequest sends a 'setFunctionBreakpoints' request.
-func (c *DAPClient) SetFunctionBreakpointsRequest(functions []string) (int, error) {
+func (c *dapClient) SetFunctionBreakpointsRequest(functions []string) (int, error) {
 	req := c.newRequest("setFunctionBreakpoints")
 	request := &dap.SetFunctionBreakpointsRequest{Request: *req}
 	request.Arguments = dap.SetFunctionBreakpointsArguments{
@@ -171,62 +237,54 @@ func (c *DAPClient) SetFunctionBreakpointsRequest(functions []string) (int, erro
 	return req.Seq, c.send(request)
 }
 
-// ConfigurationDoneRequest sends a 'configurationDone' request.
-func (c *DAPClient) ConfigurationDoneRequest() (int, error) {
+func (c *dapClient) ConfigurationDoneRequest() (int, error) {
 	req := c.newRequest("configurationDone")
 	request := &dap.ConfigurationDoneRequest{Request: *req}
 	return req.Seq, c.send(request)
 }
 
-// ContinueRequest sends a 'continue' request.
-func (c *DAPClient) ContinueRequest(threadID int) (int, error) {
+func (c *dapClient) ContinueRequest(threadID int) (int, error) {
 	req := c.newRequest("continue")
 	request := &dap.ContinueRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
 	return req.Seq, c.send(request)
 }
 
-// NextRequest sends a 'next' request.
-func (c *DAPClient) NextRequest(threadID int) (int, error) {
+func (c *dapClient) NextRequest(threadID int) (int, error) {
 	req := c.newRequest("next")
 	request := &dap.NextRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
 	return req.Seq, c.send(request)
 }
 
-// StepInRequest sends a 'stepIn' request.
-func (c *DAPClient) StepInRequest(threadID int) (int, error) {
+func (c *dapClient) StepInRequest(threadID int) (int, error) {
 	req := c.newRequest("stepIn")
 	request := &dap.StepInRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
 	return req.Seq, c.send(request)
 }
 
-// StepOutRequest sends a 'stepOut' request.
-func (c *DAPClient) StepOutRequest(threadID int) (int, error) {
+func (c *dapClient) StepOutRequest(threadID int) (int, error) {
 	req := c.newRequest("stepOut")
 	request := &dap.StepOutRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
 	return req.Seq, c.send(request)
 }
 
-// PauseRequest sends a 'pause' request.
-func (c *DAPClient) PauseRequest(threadID int) (int, error) {
+func (c *dapClient) PauseRequest(threadID int) (int, error) {
 	req := c.newRequest("pause")
 	request := &dap.PauseRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
 	return req.Seq, c.send(request)
 }
 
-// ThreadsRequest sends a 'threads' request.
-func (c *DAPClient) ThreadsRequest() (int, error) {
+func (c *dapClient) ThreadsRequest() (int, error) {
 	req := c.newRequest("threads")
 	request := &dap.ThreadsRequest{Request: *req}
 	return req.Seq, c.send(request)
 }
 
-// StackTraceRequest sends a 'stackTrace' request.
-func (c *DAPClient) StackTraceRequest(threadID, startFrame, levels int) (int, error) {
+func (c *dapClient) StackTraceRequest(threadID, startFrame, levels int) (int, error) {
 	req := c.newRequest("stackTrace")
 	request := &dap.StackTraceRequest{Request: *req}
 	request.Arguments.ThreadId = threadID
@@ -235,28 +293,21 @@ func (c *DAPClient) StackTraceRequest(threadID, startFrame, levels int) (int, er
 	return req.Seq, c.send(request)
 }
 
-// ScopesRequest sends a 'scopes' request.
-func (c *DAPClient) ScopesRequest(frameID int) (int, error) {
+func (c *dapClient) ScopesRequest(frameID int) (int, error) {
 	req := c.newRequest("scopes")
 	request := &dap.ScopesRequest{Request: *req}
 	request.Arguments.FrameId = frameID
 	return req.Seq, c.send(request)
 }
 
-// VariablesRequest sends a 'variables' request.
-func (c *DAPClient) VariablesRequest(variablesReference int) (int, error) {
+func (c *dapClient) VariablesRequest(variablesReference int) (int, error) {
 	req := c.newRequest("variables")
 	request := &dap.VariablesRequest{Request: *req}
 	request.Arguments.VariablesReference = variablesReference
 	return req.Seq, c.send(request)
 }
 
-// EvaluateRequest sends an 'evaluate' request.
-// We build the arguments as raw JSON instead of using dap.EvaluateArguments
-// because go-dap uses omitempty on FrameId, which drops frameId=0 from the
-// wire. GDB's native DAP uses 0-based frame IDs, so omitting frameId=0
-// causes evaluation in global scope where local variables aren't visible.
-func (c *DAPClient) EvaluateRequest(expression string, frameID int, context string) (int, error) {
+func (c *dapClient) EvaluateRequest(expression string, frameID int, context string) (int, error) {
 	req := c.newRequest("evaluate")
 	args := map[string]any{
 		"expression": expression,
@@ -275,8 +326,7 @@ func (c *DAPClient) EvaluateRequest(expression string, frameID int, context stri
 	return req.Seq, dap.WriteProtocolMessage(c.rwc, &msg)
 }
 
-// DisconnectRequest sends a 'disconnect' request.
-func (c *DAPClient) DisconnectRequest(terminateDebuggee bool) (int, error) {
+func (c *dapClient) DisconnectRequest(terminateDebuggee bool) (int, error) {
 	req := c.newRequest("disconnect")
 	request := &dap.DisconnectRequest{Request: *req}
 	request.Arguments = &dap.DisconnectArguments{
@@ -285,8 +335,7 @@ func (c *DAPClient) DisconnectRequest(terminateDebuggee bool) (int, error) {
 	return req.Seq, c.send(request)
 }
 
-// SetVariableRequest sends a 'setVariable' request.
-func (c *DAPClient) SetVariableRequest(variablesRef int, name, value string) (int, error) {
+func (c *dapClient) SetVariableRequest(variablesRef int, name, value string) (int, error) {
 	req := c.newRequest("setVariable")
 	request := &dap.SetVariableRequest{Request: *req}
 	request.Arguments.VariablesReference = variablesRef
@@ -295,8 +344,7 @@ func (c *DAPClient) SetVariableRequest(variablesRef int, name, value string) (in
 	return req.Seq, c.send(request)
 }
 
-// RestartRequest sends a 'restart' request with specified arguments, if provided.
-func (c *DAPClient) RestartRequest(arguments map[string]any) (int, error) {
+func (c *dapClient) RestartRequest(arguments map[string]any) (int, error) {
 	req := c.newRequest("restart")
 	request := &dap.RestartRequest{Request: *req}
 	if arguments != nil {
@@ -305,22 +353,19 @@ func (c *DAPClient) RestartRequest(arguments map[string]any) (int, error) {
 	return req.Seq, c.send(request)
 }
 
-// LoadedSourcesRequest sends a 'loadedSources' request.
-func (c *DAPClient) LoadedSourcesRequest() (int, error) {
+func (c *dapClient) LoadedSourcesRequest() (int, error) {
 	req := c.newRequest("loadedSources")
 	request := &dap.LoadedSourcesRequest{Request: *req}
 	return req.Seq, c.send(request)
 }
 
-// ModulesRequest sends a 'modules' request.
-func (c *DAPClient) ModulesRequest() (int, error) {
+func (c *dapClient) ModulesRequest() (int, error) {
 	req := c.newRequest("modules")
 	request := &dap.ModulesRequest{Request: *req}
 	return req.Seq, c.send(request)
 }
 
-// DisassembleRequest sends a 'disassemble' request.
-func (c *DAPClient) DisassembleRequest(memoryReference string, instructionOffset, instructionCount int) (int, error) {
+func (c *dapClient) DisassembleRequest(memoryReference string, instructionOffset, instructionCount int) (int, error) {
 	req := c.newRequest("disassemble")
 	request := &dap.DisassembleRequest{Request: *req}
 	request.Arguments.MemoryReference = memoryReference

@@ -293,9 +293,13 @@ Delve uses `"launch"` for core dumps, GDB uses `"attach"`. This protocol quirk b
 
 ## `DAPClient` (`dap.go:25`)
 
-### No interface — concrete type welded to all consumers
+### ✅ No interface — concrete type welded to all consumers
 
-Every function in `tools.go` and `session.go` takes `*DAPClient` directly. Consequences: no mocking for isolation tests, no alternative transport implementations (WebSocket, in-process), every consumer must change to add a new client.
+**Resolved.** `DAPClient` is now an interface with 24 methods. The concrete struct is `dapClient` (unexported). `debuggerSession.client` uses the interface type. All free functions (`readAndValidateResponse`, `readTypedResponse`) accept the interface. `LaunchRequest` and `AttachRequest` methods added, eliminating `newRequest`+`send` exposure to callers. Mock-based unit testing is now possible.
+
+### ✅ `InitializeRequest` is the anomaly
+
+**Resolved.** `InitializeRequest` now accepts `ctx context.Context` and uses `ReadMessageWithContext(ctx)` — consistent with all other request methods.
 
 ### Send and receive split across layers
 
@@ -331,14 +335,14 @@ Calling twice without `unregisterSessionTools()` between causes silent state dri
 
 ## Implementation Order
 
-| Priority | Change | Reason |
-|----------|--------|--------|
-| 1 | Extract `DAPClient` interface | Unblocks mock-based unit testing for all tool handlers |
-| 2 | Merge transport into `Spawn()` return | Eliminates `TransportMode()` + `StdioPipes()` + `port` parameter — 3 methods collapse into 1 |
-| 3 | Pair send+receive in DAPClient | Moves seq-matching responsibility from tools.go into the client |
-| 4 | Split `DebuggerBackend` by capability | Let backends implement only modes they support |
-| 5 | Add `Close()` to `DebuggerBackend` | Formalize resource lifecycle |
-| 6 | Export session state tool | Make session status queryable by MCP clients |
+| Priority | Change | Status | Reason |
+|----------|--------|--------|--------|
+| 1 | Extract `DAPClient` interface | ✅ Done | Unblocks mock-based unit testing for all tool handlers |
+| 2 | Merge transport into `Spawn()` return | Pending | Eliminates `TransportMode()` + `StdioPipes()` + `port` parameter — 3 methods collapse into 1 |
+| 3 | Pair send+receive in DAPClient | Pending | Moves seq-matching responsibility from tools.go into the client |
+| 4 | Split `DebuggerBackend` by capability | Pending | Let backends implement only modes they support |
+| 5 | Add `Close()` to `DebuggerBackend` | Pending | Formalize resource lifecycle |
+| 6 | Export session state tool | Pending | Make session status queryable by MCP clients |
 
 ---
 
@@ -417,6 +421,18 @@ Full inventory in `handoff_go_dap_exception_types.md`.
 
 ## Read Timeouts and Cancellation
 
+### Status: Partially resolved (Phases 1-2 complete)
+
+**Done:**
+- ✅ `ReadMessageWithContext(ctx)` on `DAPClient` — goroutine + `select` on `ctx.Done()`
+- ✅ `ctx` threaded through all DAP reads — `readAndValidateResponse`, `readTypedResponse`, all event-waiting loops, `waitForInitialized`, `handleFirstStop`, `configureSession`, `startSession`, `getThreadList`, `getFullContext`, `writeScopesAndVariables`
+- ✅ `CancelRequest(requestId)` on `DAPClient` — raw JSON, gated on `SupportsCancelRequest`
+- ✅ `InitializeRequest` uses `ReadMessageWithContext(ctx)`
+
+**Remaining:**
+- ❌ 30s `context.WithTimeout` before event-waiting loops
+- ❌ Send `CancelRequest` on context cancellation for `continue`/`step`
+
 ### Problem
 
 All DAP response-reading loops (`continueExecution`, `step`, `handleFirstStop`,
@@ -429,36 +445,16 @@ The go-sdk v1.6.1 passes `context.Context` to every tool handler, and the MCP
 transport supports `notifications/cancelled`. Both are available but not wired
 to DAP reads.
 
-### Target
+### Remaining Steps
 
-1. **Add context-aware read to `DAPClient`**: a `ReadMessageWithContext(ctx)`
-   method that uses a goroutine + `select` on `ctx.Done()` to return an error
-   when the context is cancelled. Existing `ReadMessage()` remains for backward
-   compatibility; callers inside event-waiting loops switch to the context-aware
-   variant.
-
-2. **Wire the `ctx` parameter from tool handlers**: All tool handlers already
-   receive `ctx context.Context` as their first parameter — the context is
-   simply ignored during DAP reads. Pass it through.
-
-3. **Send `cancel` DAP request on timeout**: If the context is cancelled (the
-   MCP client sent `notifications/cancelled`), send a DAP `cancel` request with
-   the in-flight request's sequence number before returning. Gate on
-   `capabilities.SupportsCancelRequest`.
-
-4. **Add a `readTimeout` constant**: Default 30 seconds for tool calls. The
+1. **Add a `readTimeout` constant**: Default 30 seconds for tool calls. The
    context is wrapped with `context.WithTimeout` to prevent indefinite hangs
    even if the MCP client doesn't cancel.
 
-### Files
-
-- `dap.go` — new `ReadMessageWithContext(ctx) (dap.Message, error)` method
-- `dap.go` — new `CancelRequest(requestId int) (int, error)` method (raw JSON,
-  go-dap v0.12.0 lacks the type)
-- `tools.go` — replace `client.ReadMessage()` with `client.ReadMessageWithContext(ctx)`
-  in all event-waiting loops
-- `session.go` — same for `readAndValidateResponse`, `readTypedResponse`
-  (thread context through or accept a `ctx` parameter)
+2. **Send `cancel` DAP request on timeout**: If the context is cancelled (the
+   MCP client sent `notifications/cancelled`), send a DAP `cancel` request with
+   the in-flight request's sequence number before returning. Gate on
+   `capabilities.SupportsCancelRequest`.
 
 ### Verification
 

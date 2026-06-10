@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -17,7 +18,7 @@ import (
 type debuggerSession struct {
 	mu                   sync.Mutex
 	cmd                  *exec.Cmd
-	client               *DAPClient
+	client               DAPClient
 	server               *mcp.Server
 	logWriter            io.Writer
 	backend              debugadapters.DebuggerBackend
@@ -211,7 +212,7 @@ func (ds *debuggerSession) cleanup() {
 	ds.unregisterSessionTools()
 }
 
-func (ds *debuggerSession) getThreadList() string {
+func (ds *debuggerSession) getThreadList(ctx context.Context) string {
 	if ds.client == nil {
 		return "(debugger not connected)"
 	}
@@ -220,7 +221,7 @@ func (ds *debuggerSession) getThreadList() string {
 		log.Printf("getThreadList: ThreadsRequest failed: %v", err)
 		return "(unable to get thread list)"
 	}
-	resp, err := readTypedResponse[*dap.ThreadsResponse](ds.client, seq)
+	resp, err := readTypedResponse[*dap.ThreadsResponse](ctx, ds.client, seq)
 	if err != nil {
 		log.Printf("getThreadList: readTypedResponse failed: %v", err)
 		return "(unable to get thread list)"
@@ -232,7 +233,7 @@ func (ds *debuggerSession) getThreadList() string {
 	return threads.String()
 }
 
-func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mcp.CallToolResult, error) {
+func (ds *debuggerSession) getFullContext(ctx context.Context, threadID, frameID, maxFrames int) (*mcp.CallToolResult, error) {
 	if ds.client == nil {
 		return nil, fmt.Errorf("debugger not started")
 	}
@@ -243,7 +244,7 @@ func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mc
 	if err != nil {
 		return nil, err
 	}
-	stResp, err := readTypedResponse[*dap.StackTraceResponse](ds.client, stSeq)
+	stResp, err := readTypedResponse[*dap.StackTraceResponse](ctx, ds.client, stSeq)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get stack trace: %w", err)
 	}
@@ -284,7 +285,7 @@ func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mc
 	}
 	ds.lastFrameID = targetFrameID
 
-	ds.writeScopesAndVariables(&result, targetFrameID)
+	ds.writeScopesAndVariables(ctx, &result, targetFrameID)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result.String()}},
@@ -317,14 +318,14 @@ func stopSummary(full *mcp.CallToolResult, reason string, hitBreakpointIds []int
 	}
 }
 
-func (ds *debuggerSession) writeScopesAndVariables(result *strings.Builder, frameID int) {
+func (ds *debuggerSession) writeScopesAndVariables(ctx context.Context, result *strings.Builder, frameID int) {
 	scopesSeq, err := ds.client.ScopesRequest(frameID)
 	if err != nil {
 		result.WriteString("## Variables\n(unable to retrieve scopes)\n")
 		return
 	}
 
-	scopesResp, err := readTypedResponse[*dap.ScopesResponse](ds.client, scopesSeq)
+	scopesResp, err := readTypedResponse[*dap.ScopesResponse](ctx, ds.client, scopesSeq)
 	if err != nil {
 		result.WriteString("## Variables\n(unable to retrieve scopes)\n")
 		return
@@ -349,7 +350,7 @@ func (ds *debuggerSession) writeScopesAndVariables(result *strings.Builder, fram
 			result.WriteString("  (unable to retrieve variables)\n")
 			continue
 		}
-		varResp, err := readTypedResponse[*dap.VariablesResponse](ds.client, varSeq)
+		varResp, err := readTypedResponse[*dap.VariablesResponse](ctx, ds.client, varSeq)
 		if err != nil {
 			result.WriteString("  (unable to retrieve variables)\n")
 			continue
