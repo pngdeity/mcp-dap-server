@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -147,6 +149,9 @@ func TestVariables(t *testing.T) {
 }
 
 func TestStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -177,6 +182,9 @@ func TestStep(t *testing.T) {
 }
 
 func TestStepIn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -204,6 +212,9 @@ func TestStepIn(t *testing.T) {
 }
 
 func TestStepOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -232,6 +243,9 @@ func TestStepOut(t *testing.T) {
 }
 
 func TestSetVariable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -269,6 +283,9 @@ func TestSetVariable(t *testing.T) {
 }
 
 func TestPause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -292,6 +309,9 @@ func TestPause(t *testing.T) {
 }
 
 func TestCoreDump(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -320,6 +340,9 @@ func TestCoreDump(t *testing.T) {
 }
 
 func TestClearBreakpoints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -357,6 +380,9 @@ func TestClearBreakpoints(t *testing.T) {
 }
 
 func TestInfo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 
@@ -387,6 +413,9 @@ func TestInfo(t *testing.T) {
 }
 
 func TestDisassemble(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	ts := setupMCPServerAndClient(t)
 	defer ts.cleanup()
 

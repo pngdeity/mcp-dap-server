@@ -213,17 +213,17 @@ func (ds *debuggerSession) cleanup() {
 
 func (ds *debuggerSession) getThreadList() string {
 	if ds.client == nil {
-		return ""
+		return "(debugger not connected)"
 	}
 	seq, err := ds.client.ThreadsRequest()
 	if err != nil {
 		log.Printf("getThreadList: ThreadsRequest failed: %v", err)
-		return ""
+		return "(unable to get thread list)"
 	}
 	resp, err := readTypedResponse[*dap.ThreadsResponse](ds.client, seq)
 	if err != nil {
 		log.Printf("getThreadList: readTypedResponse failed: %v", err)
-		return ""
+		return "(unable to get thread list)"
 	}
 	var threads strings.Builder
 	for _, t := range resp.Body.Threads {

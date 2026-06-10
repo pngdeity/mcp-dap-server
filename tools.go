@@ -887,6 +887,17 @@ func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mc
 			Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
 		}, nil, nil
 	}
+	// Drain leftover events before returning so the next tool call does not
+	// consume a stale StoppedEvent as a spurious stop.
+	for {
+		msg, err := ds.client.ReadMessage()
+		if err != nil {
+			break
+		}
+		if _, ok := msg.(dap.EventMessage); !ok {
+			break
+		}
+	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Debug session started for %s. Use 'breakpoint' to set breakpoints and 'continue' to run.", params.Path)}},
 	}, nil, nil

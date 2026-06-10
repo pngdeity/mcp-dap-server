@@ -6,6 +6,7 @@ import (
 )
 
 func TestFlexIntUnmarshal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -38,6 +39,7 @@ func TestFlexIntUnmarshal(t *testing.T) {
 }
 
 func TestFlexIntInStruct(t *testing.T) {
+	t.Parallel()
 	type testParams struct {
 		Count FlexInt `json:"count"`
 	}

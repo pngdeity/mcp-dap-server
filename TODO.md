@@ -470,150 +470,6 @@ to DAP reads.
 
 ---
 
-## StoppedEvent Wire Leak
-
-### Problem
-
-When `debug()` is called with `stopOnEntry: true` or no breakpoints, the
-`handleFirstStop()` function at `tools.go:795` consumes one `StoppedEvent` but
-may leave a second one on the wire. The comment at the stop-on-entry return
-path notes: "The StoppedEvent from the adapter (if any) will be consumed by the
-next readTypedResponse call, which skips EventMessages."
-
-This is correct for `readTypedResponse` (which skips events) but NOT for
-event-waiting loops like `continueExecution` or `step`. A leftover
-`StoppedEvent` consumed by `continueExecution`'s loop causes `getFullContext`
-to run, producing a spurious stop summary when the user only asked to continue.
-
-### Affected code paths
-
-`tools.go`:
-- `handleFirstStop()` — the stop-on-entry early-return path (reads one
-  StoppedEvent, drains none after)
-- `handleFirstStop()` — the entry→auto-continue→breakpoint path (loops until
-  non-"entry" StoppedEvent, but entry events from other threads could arrive)
-
-### Target
-
-After consuming the intended `StoppedEvent` in `handleFirstStop()`, drain any
-remaining events from the wire before returning. Use a non-blocking read with
-a short timeout:
-
-```go
-// Drain any leftover StoppedEvents before returning.
-for {
-    msg, err := ds.client.ReadMessage()
-    if err != nil { break }
-    if _, ok := msg.(*dap.StoppedEvent); !ok { break }
-}
-```
-
-A cleaner approach: `DAPClient` provides a `DrainEvents()` method that reads
-all available messages and discards events, returning any pending response.
-
-### Verification
-
-- [ ] `go build ./...` succeeds
-- [ ] `debug(mode="source", stopOnEntry=true)` followed by `continue()` does not
-  produce a spurious stop
-- [ ] Existing tests pass unchanged
-
----
-
-## Response Reader Robustness
-
-### Problem
-
-`readAndValidateResponse` (`tools.go:18`) and `readTypedResponse[T]`
-(`tools.go:51`) have `switch msg.(type)` blocks with `case dap.ResponseMessage:`
-and `case dap.EventMessage:` but no `default:` arm. If go-dap ever introduces
-a new `dap.Message` type (or returns `nil`), the loop silently continues
-forever — an infinite busy loop holding the mutex.
-
-### Target
-
-Add a `default:` case to both readers that logs the unexpected type and
-continues:
-
-```go
-default:
-    log.Printf("readAndValidateResponse: unexpected message type %T (request_seq=%d)", msg, requestSeq)
-    continue
-```
-
-### Files
-
-- `tools.go` — `readAndValidateResponse` (line 38)
-- `tools.go` — `readTypedResponse[T]` (line 84)
-
-### Verification
-
-- [ ] `go build ./...` succeeds
-- [ ] `go vet ./...` clean
-- [ ] No behavioral change for known message types
-
----
-
-## Protocol Logging Redundancy
-
-### Problem
-
-`send()` at `dap.go:125` logs `SENT` messages when `c.logWriter` is set.
-`EvaluateRequest` at `dap.go:266` has its own inline logging because it
-constructs messages as raw JSON (`map[string]any`) rather than using go-dap
-typed structs. The log format strings are identical (`"SENT: <<<%s>>>\n"`),
-but if the format changes, it must be updated in two places.
-
-### Target
-
-Refactor `EvaluateRequest` to use `send()` by constructing the message
-differently, or extract a shared `logSend(data)` helper that both paths call.
-
-### Files
-
-- `dap.go` — `send()` and `EvaluateRequest`
-
-### Verification
-
-- [ ] `go build ./...` succeeds
-- [ ] Protocol logging produces identical output before and after
-
----
-
-## Error Handling and Diagnostics Polish
-
-### flexint format string
-
-`flexint.go:31` — `fmt.Errorf("cannot unmarshal %q as integer", string(data))`.
-When `data` is `[]byte(`"abc"`)`, this produces:
-`cannot unmarshal "\"abc\"" as integer`. The `%q` adds an extra layer of quotes
-around the already-quoted raw JSON bytes.
-
-**Fix**: Change to `%s` for raw bytes, or trim quotes from the input first.
-
-### getThreadList error swallowing
-
-`session.go:211-228` — both `ThreadsRequest()` and `readTypedResponse` error
-paths return empty string with no logging. When `context()` appends the empty
-string to an error message, the result is `"<original error>\n\nAvailable
-threads...\n"` with no actual thread list.
-
-**Fix**: Log failures at debug level. Return a descriptive error string instead
-of empty string.
-
-### Files
-
-- `flexint.go` — format string fix
-- `session.go` — `getThreadList()` logging
-
-### Verification
-
-- [ ] `go build ./...` succeeds
-- [ ] FlexInt error message is readable (no extra quote escaping)
-- [ ] Thread errors produce useful debug logs
-
----
-
 ## MCP Integration Improvements
 
 ### MCP Logging
@@ -665,12 +521,15 @@ type StepParams struct {
 Passes `granularity` to the `next`/`stepIn`/`stepOut` DAP requests.
 **Gating**: `capabilities.SupportsSteppingGranularity`.
 
-### VariablePresentationHint
+### VariablePresentationHint (partially resolved)
 
-The `Variable` type from go-dap has `PresentationHint` with fields `Kind`
-("class", "interface", "method", "property", "data", "virtual"), `Attributes`
-("static", "constant", "readOnly"), and `Visibility` ("public", "private").
-This metadata is available in DAP responses but not surfaced in
+Frame-level `PresentationHint == "subtle"` is now surfaced as `" (runtime)"` in
+stack trace output (`session.go:274`).
+
+Remaining: the `Variable` type from go-dap has `PresentationHint` with fields
+`Kind` ("class", "interface", "method", "property", "data", "virtual"),
+`Attributes` ("static", "constant", "readOnly"), and `Visibility` ("public",
+"private"). This metadata is available in DAP responses but not surfaced in
 `writeScopesAndVariables()`.
 
 Include variable hints in the formatted output:

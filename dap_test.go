@@ -10,6 +10,7 @@ import (
 )
 
 func TestNewDAPClientFromRWC(t *testing.T) {
+	t.Parallel()
 	// Create a pipe to simulate a bidirectional connection
 	serverReader, clientWriter := io.Pipe()
 	clientReader, serverWriter := io.Pipe()

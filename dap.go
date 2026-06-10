@@ -122,11 +122,16 @@ func (c *DAPClient) newRequest(command string) *dap.Request {
 	return request
 }
 
-func (c *DAPClient) send(request dap.Message) error {
+// logSend logs a marshaled message at SENT level if a protocol logger is configured.
+func (c *DAPClient) logSend(data []byte) {
 	if c.logWriter != nil {
-		if data, err := json.Marshal(request); err == nil {
-			fmt.Fprintf(c.logWriter, "SENT: <<<%s>>>\n", data)
-		}
+		fmt.Fprintf(c.logWriter, "SENT: <<<%s>>>\n", data)
+	}
+}
+
+func (c *DAPClient) send(request dap.Message) error {
+	if data, err := json.Marshal(request); err == nil {
+		c.logSend(data)
 	}
 	return dap.WriteProtocolMessage(c.rwc, request)
 }
@@ -264,10 +269,8 @@ func (c *DAPClient) EvaluateRequest(expression string, frameID int, context stri
 		dap.Request
 		Arguments map[string]any `json:"arguments"`
 	}{Request: *req, Arguments: args}
-	if c.logWriter != nil {
-		if data, err := json.Marshal(&msg); err == nil {
-			fmt.Fprintf(c.logWriter, "SENT: <<<%s>>>\n", data)
-		}
+	if data, err := json.Marshal(&msg); err == nil {
+		c.logSend(data)
 	}
 	return req.Seq, dap.WriteProtocolMessage(c.rwc, &msg)
 }

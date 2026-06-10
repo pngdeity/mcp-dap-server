@@ -113,16 +113,19 @@ func testBackendCompliance(t *testing.T, factory func() DebuggerBackend) {
 }
 
 func TestDelveInterfaceCompliance(t *testing.T) {
+	t.Parallel()
 	testBackendCompliance(t, func() DebuggerBackend { return &DelveBackend{} })
 }
 
 func TestGDBInterfaceCompliance(t *testing.T) {
+	t.Parallel()
 	testBackendCompliance(t, func() DebuggerBackend {
 		return &GDBBackend{GDBPath: "gdb"}
 	})
 }
 
 func TestBashInterfaceCompliance(t *testing.T) {
+	t.Parallel()
 	testBackendCompliance(t, func() DebuggerBackend {
 		return &BashBackend{
 			BashPath:   "/bin/bash",

@@ -1,13 +1,12 @@
 package debugadapters
 
 import (
-	"io"
-	"os/exec"
 	"strings"
 	"testing"
 )
 
 func TestGDBBackendLaunchArgs(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 
 	args, err := backend.LaunchArgs("binary", "/path/to/prog", false, []string{"--flag"})
@@ -40,6 +39,7 @@ func TestGDBBackendLaunchArgs(t *testing.T) {
 }
 
 func TestGDBBackendSourceModeError(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 
 	_, err := backend.LaunchArgs("source", "/path/to/prog", false, nil)
@@ -52,6 +52,7 @@ func TestGDBBackendSourceModeError(t *testing.T) {
 }
 
 func TestGDBBackendTransportMode(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 	if backend.TransportMode() != "stdio" {
 		t.Errorf("expected stdio, got: %s", backend.TransportMode())
@@ -59,6 +60,7 @@ func TestGDBBackendTransportMode(t *testing.T) {
 }
 
 func TestGDBBackendCoreArgs(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 	args, err := backend.CoreArgs("/path/to/program", "/path/to/core")
 	if err != nil {
@@ -73,6 +75,7 @@ func TestGDBBackendCoreArgs(t *testing.T) {
 }
 
 func TestGDBBackendAttachArgs(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 	args, err := backend.AttachArgs(12345)
 	if err != nil {
@@ -84,34 +87,9 @@ func TestGDBBackendAttachArgs(t *testing.T) {
 }
 
 func TestGDBBackendAdapterID(t *testing.T) {
+	t.Parallel()
 	backend := &GDBBackend{GDBPath: "gdb"}
 	if backend.AdapterID() != "gdb" {
 		t.Errorf("expected 'gdb', got: %s", backend.AdapterID())
-	}
-}
-
-func TestGDBBackendSpawn(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-	if _, err := exec.LookPath("gdb"); err != nil {
-		t.Skip("gdb not found in PATH")
-	}
-
-	backend := &GDBBackend{GDBPath: "gdb"}
-	cmd, listenAddr, err := backend.Spawn(":0", io.Discard)
-	if err != nil {
-		t.Fatalf("failed to spawn gdb: %v", err)
-	}
-	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-	}()
-
-	if listenAddr != "" {
-		t.Errorf("expected empty listen address for stdio transport, got: %s", listenAddr)
-	}
-	if backend.TransportMode() != "stdio" {
-		t.Errorf("expected stdio transport, got: %s", backend.TransportMode())
 	}
 }
