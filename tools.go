@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/pngdeity/mcp-dap-server/debugadapters"
 )
 
@@ -90,6 +89,44 @@ func readTypedResponse[T dap.ResponseMessage](client *DAPClient, requestSeq int)
 	}
 }
 
+// maxOutputLines caps the number of program output lines buffered during
+// continue/step to prevent token blowout from unbounded output.
+const maxOutputLines = 200
+
+// appendOutputEvent buffers a DAP OutputEvent (stdout/stderr only) into buf.
+// Returns the updated line count. Stops appending once maxOutputLines is reached.
+func appendOutputEvent(buf *strings.Builder, event *dap.OutputEvent, lines int) int {
+	if event.Body.Category != "stdout" && event.Body.Category != "stderr" {
+		return lines
+	}
+	if lines >= maxOutputLines {
+		return lines
+	}
+	for _, ch := range event.Body.Output {
+		buf.WriteRune(ch)
+		if ch == '\n' {
+			lines++
+			if lines >= maxOutputLines {
+				buf.WriteString("... (output truncated after 200 lines)\n")
+				return lines
+			}
+		}
+	}
+	return lines
+}
+
+// prependOutputToResult prepends program output text to a CallToolResult's
+// first TextContent block. The result is modified in place.
+func prependOutputToResult(result *mcp.CallToolResult, output string) *mcp.CallToolResult {
+	if output == "" || len(result.Content) == 0 {
+		return result
+	}
+	if tc, ok := result.Content[0].(*mcp.TextContent); ok {
+		tc.Text = "Program Output:\n" + output + "\n" + tc.Text
+	}
+	return result
+}
+
 // clearBreakpoints removes breakpoints.
 func (ds *debuggerSession) clearBreakpoints(ctx context.Context, _ *mcp.CallToolRequest, params ClearBreakpointsParams) (*mcp.CallToolResult, any, error) {
 	ds.mu.Lock()
@@ -164,6 +201,8 @@ func (ds *debuggerSession) continueExecution(ctx context.Context, _ *mcp.CallToo
 		return nil, nil, err
 	}
 
+	var outputBuf strings.Builder
+	var outputLines int
 	for {
 		msg, err := ds.client.ReadMessage()
 		if err != nil {
@@ -179,13 +218,22 @@ func (ds *debuggerSession) continueExecution(ctx context.Context, _ *mcp.CallToo
 			if !r.Success {
 				return nil, nil, fmt.Errorf("continue failed: %s", r.Message)
 			}
+		case *dap.OutputEvent:
+			if params.IncludeOutput {
+				outputLines = appendOutputEvent(&outputBuf, resp, outputLines)
+			}
+			continue
 		case *dap.StoppedEvent:
 			ds.stoppedThreadID = resp.Body.ThreadId
+			ds.lastHitBreakpointIds = resp.Body.HitBreakpointIds
 			result, err := ds.getFullContext(resp.Body.ThreadId, 0, 20)
+			if outputBuf.Len() > 0 {
+				result = prependOutputToResult(result, outputBuf.String())
+			}
 			if err != nil || params.FullContext {
 				return result, nil, err
 			}
-			return stopSummary(result, resp.Body.Reason), nil, nil
+			return stopSummary(result, resp.Body.Reason, resp.Body.HitBreakpointIds), nil, nil
 		case *dap.TerminatedEvent:
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
@@ -470,8 +518,14 @@ func (ds *debuggerSession) disassembleCode(ctx context.Context, _ *mcp.CallToolR
 	result.WriteString("Disassembly:\n")
 	for _, inst := range disResp.Body.Instructions {
 		fmt.Fprintf(&result, "  %s  %s", inst.Address, inst.Instruction)
+		if inst.Symbol != "" {
+			fmt.Fprintf(&result, "  <%s>", inst.Symbol)
+		}
 		if inst.Location != nil && inst.Location.Path != "" {
 			fmt.Fprintf(&result, "  ; %s:%d", inst.Location.Path, inst.Line)
+			if inst.EndLine > 0 && inst.EndLine != inst.Line {
+				fmt.Fprintf(&result, "-%d", inst.EndLine)
+			}
 		}
 		result.WriteString("\n")
 	}
@@ -740,22 +794,33 @@ func (ds *debuggerSession) configureSession(breakpoints []BreakpointSpec) error 
 
 func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mcp.CallToolResult, any, error) {
 	if mode == "core" {
+		var outputBuf strings.Builder
+		var outputLines int
 		for {
 			msg, err := ds.client.ReadMessage()
 			if err != nil {
 				return nil, nil, err
 			}
 			switch ev := msg.(type) {
+			case *dap.OutputEvent:
+				if params.IncludeOutput {
+					outputLines = appendOutputEvent(&outputBuf, ev, outputLines)
+				}
+				continue
 			case *dap.StoppedEvent:
 				ds.stoppedThreadID = ev.Body.ThreadId
+				ds.lastHitBreakpointIds = ev.Body.HitBreakpointIds
 				if ds.stoppedThreadID == 0 {
 					ds.stoppedThreadID = 1
 				}
 				result, err := ds.getFullContext(ds.stoppedThreadID, 0, 20)
+				if outputBuf.Len() > 0 {
+					result = prependOutputToResult(result, outputBuf.String())
+				}
 				if err != nil || params.FullContext {
 					return result, nil, err
 				}
-				return stopSummary(result, ev.Body.Reason), nil, nil
+				return stopSummary(result, ev.Body.Reason, ev.Body.HitBreakpointIds), nil, nil
 			case dap.EventMessage:
 				continue
 			}
@@ -764,12 +829,20 @@ func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mc
 
 	if len(params.Breakpoints) > 0 && !params.StopOnEntry {
 		var stoppedThreadID int
+		var stoppedHitBreakpointIds []int
+		var outputBuf strings.Builder
+		var outputLines int
 		for {
 			msg, err := ds.client.ReadMessage()
 			if err != nil {
 				return nil, nil, err
 			}
 			switch ev := msg.(type) {
+			case *dap.OutputEvent:
+				if params.IncludeOutput {
+					outputLines = appendOutputEvent(&outputBuf, ev, outputLines)
+				}
+				continue
 			case *dap.StoppedEvent:
 				if ev.Body.Reason == "entry" {
 					if _, err := ds.client.ContinueRequest(ev.Body.ThreadId); err != nil {
@@ -778,7 +851,9 @@ func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mc
 					continue
 				}
 				stoppedThreadID = ev.Body.ThreadId
+				stoppedHitBreakpointIds = ev.Body.HitBreakpointIds
 				ds.stoppedThreadID = stoppedThreadID
+				ds.lastHitBreakpointIds = stoppedHitBreakpointIds
 				goto stopped
 			case *dap.TerminatedEvent:
 				return &mcp.CallToolResult{
@@ -791,10 +866,13 @@ func (ds *debuggerSession) handleFirstStop(params DebugParams, mode string) (*mc
 			stoppedThreadID = 1
 		}
 		result, err := ds.getFullContext(stoppedThreadID, 0, 20)
+		if outputBuf.Len() > 0 {
+			result = prependOutputToResult(result, outputBuf.String())
+		}
 		if err != nil || params.FullContext {
 			return result, nil, err
 		}
-		return stopSummary(result, "breakpoint"), nil, nil
+		return stopSummary(result, "breakpoint", stoppedHitBreakpointIds), nil, nil
 	}
 
 	msg, err := ds.client.ReadMessage()
@@ -879,6 +957,8 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 	}
 
 	// Wait for stopped or terminated event
+	var outputBuf strings.Builder
+	var outputLines int
 	for {
 		msg, err := ds.client.ReadMessage()
 		if err != nil {
@@ -894,13 +974,22 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 			if !r.Success {
 				return nil, nil, fmt.Errorf("step failed: %s", r.Message)
 			}
+		case *dap.OutputEvent:
+			if params.IncludeOutput {
+				outputLines = appendOutputEvent(&outputBuf, resp, outputLines)
+			}
+			continue
 		case *dap.StoppedEvent:
 			ds.stoppedThreadID = resp.Body.ThreadId
+			ds.lastHitBreakpointIds = resp.Body.HitBreakpointIds
 			result, err := ds.getFullContext(resp.Body.ThreadId, 0, 20)
+			if outputBuf.Len() > 0 {
+				result = prependOutputToResult(result, outputBuf.String())
+			}
 			if err != nil || params.FullContext {
 				return result, nil, err
 			}
-			return stopSummary(result, resp.Body.Reason), nil, nil
+			return stopSummary(result, resp.Body.Reason, resp.Body.HitBreakpointIds), nil, nil
 		case *dap.TerminatedEvent:
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},

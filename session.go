@@ -11,25 +11,25 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/pngdeity/mcp-dap-server/debugadapters"
 )
 
 type debuggerSession struct {
-	mu              sync.Mutex
-	cmd             *exec.Cmd
-	client          *DAPClient
-	server          *mcp.Server
-	logWriter       io.Writer
-	backend         debugadapters.DebuggerBackend
-	capabilities    dap.Capabilities
-	launchMode      string
-	programPath     string
-	programArgs     []string
-	coreFilePath    string
-	stoppedThreadID int
-	lastFrameID     int
-	protocolLogFile *os.File
+	mu                   sync.Mutex
+	cmd                  *exec.Cmd
+	client               *DAPClient
+	server               *mcp.Server
+	logWriter            io.Writer
+	backend              debugadapters.DebuggerBackend
+	capabilities         dap.Capabilities
+	launchMode           string
+	programPath          string
+	programArgs          []string
+	coreFilePath         string
+	stoppedThreadID      int
+	lastFrameID          int
+	lastHitBreakpointIds []int
+	protocolLogFile      *os.File
 }
 
 func (ds *debuggerSession) defaultThreadID() int {
@@ -207,6 +207,7 @@ func (ds *debuggerSession) cleanup() {
 	ds.capabilities = dap.Capabilities{}
 	ds.stoppedThreadID = 0
 	ds.lastFrameID = -1
+	ds.lastHitBreakpointIds = nil
 	ds.unregisterSessionTools()
 }
 
@@ -255,6 +256,9 @@ func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mc
 		if top.Source != nil {
 			fmt.Fprintf(&result, "File: %s:%d\n", top.Source.Path, top.Line)
 		}
+		if len(ds.lastHitBreakpointIds) > 0 {
+			fmt.Fprintf(&result, "Hit breakpoints: %v\n", ds.lastHitBreakpointIds)
+		}
 		result.WriteString("\n")
 	}
 
@@ -287,7 +291,7 @@ func (ds *debuggerSession) getFullContext(threadID, frameID, maxFrames int) (*mc
 	}, nil
 }
 
-func stopSummary(full *mcp.CallToolResult, reason string) *mcp.CallToolResult {
+func stopSummary(full *mcp.CallToolResult, reason string, hitBreakpointIds []int) *mcp.CallToolResult {
 	text := ""
 	if len(full.Content) > 0 {
 		if tc, ok := full.Content[0].(*mcp.TextContent); ok {
@@ -296,7 +300,11 @@ func stopSummary(full *mcp.CallToolResult, reason string) *mcp.CallToolResult {
 	}
 	var summary strings.Builder
 	if reason != "" {
-		fmt.Fprintf(&summary, "Stopped: %s\n", reason)
+		fmt.Fprintf(&summary, "Stopped: %s", reason)
+		if len(hitBreakpointIds) > 0 {
+			fmt.Fprintf(&summary, " (ids: %v)", hitBreakpointIds)
+		}
+		summary.WriteString("\n")
 	}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, "Function:") || strings.HasPrefix(line, "File:") {

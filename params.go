@@ -40,6 +40,7 @@ type DebugParams struct {
 	ProtocolLog     string           `json:"protocolLog,omitempty" mcp:"file path for protocol-level DAP message logging (what the MCP server sends/receives)"`
 	ToolLog         string           `json:"toolLog,omitempty" mcp:"file path for tool-level DAP logging (native debugger logging, GDB only)"`
 	FullContext     bool             `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped at a breakpoint; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	IncludeOutput   bool             `json:"includeOutput,omitempty" mcp:"if true, include program stdout/stderr output emitted before the first stop"`
 }
 
 type ContextParams struct {
@@ -49,9 +50,10 @@ type ContextParams struct {
 }
 
 type StepParams struct {
-	Mode        string  `json:"mode" mcp:"'over' (next line), 'in' (into function), 'out' (out of function)"`
-	ThreadID    FlexInt `json:"threadId,omitempty" mcp:"thread to step (default: current thread)"`
-	FullContext bool    `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	Mode          string  `json:"mode" mcp:"'over' (next line), 'in' (into function), 'out' (out of function)"`
+	ThreadID      FlexInt `json:"threadId,omitempty" mcp:"thread to step (default: current thread)"`
+	FullContext   bool    `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	IncludeOutput bool    `json:"includeOutput,omitempty" mcp:"if true, include program stdout/stderr output emitted during the step"`
 }
 
 type InfoParams struct {
@@ -74,9 +76,10 @@ type StopParams struct {
 }
 
 type ContinueParams struct {
-	ThreadID    FlexInt         `json:"threadId,omitempty" mcp:"thread to continue (default: all threads)"`
-	To          *BreakpointSpec `json:"to,omitempty" mcp:"location to run to (sets temporary breakpoint)"`
-	FullContext bool            `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	ThreadID      FlexInt         `json:"threadId,omitempty" mcp:"thread to continue (default: all threads)"`
+	To            *BreakpointSpec `json:"to,omitempty" mcp:"location to run to (sets temporary breakpoint)"`
+	FullContext   bool            `json:"fullContext,omitempty" mcp:"if true, return full context (stack trace and variables) when stopped; if false (default), return a compact stop summary — leave false unless you need variables immediately"`
+	IncludeOutput bool            `json:"includeOutput,omitempty" mcp:"if true, include program stdout/stderr output emitted during execution"`
 }
 
 type PauseParams struct {
