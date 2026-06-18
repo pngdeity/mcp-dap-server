@@ -49,16 +49,29 @@ type DAPClient interface {
 	CancelRequest(requestId int) (int, error)
 }
 
+// dapMessage pairs a DAP message with its read error.
+type dapMessage struct {
+	msg dap.Message
+	err error
+}
+
 // dapClient is a synchronous Debug Adapter Protocol client.
 // It manages a connection to a DAP server and provides methods for
 // sending each DAP request type. Each request method returns the
 // sequence number of the sent request, which callers use to match
 // the corresponding response via request_seq.
+//
+// A single background goroutine owns the bufio.Reader and pumps every
+// received DAP message into msgCh. ReadMessage / ReadMessageWithContext
+// dequeue from that channel, so there is never more than one goroutine
+// decoding from the wire.
 type dapClient struct {
 	rwc       io.ReadWriteCloser
 	reader    *bufio.Reader
 	logWriter io.Writer
 	seq       int
+	msgCh     chan dapMessage
+	done      chan struct{}
 }
 
 // newDAPClient creates a new Client over a TCP connection.
@@ -72,19 +85,75 @@ func newDAPClient(addr string) (*dapClient, error) {
 
 // newDAPClientFromRWC creates a new Client with the given ReadWriteCloser.
 func newDAPClientFromRWC(rwc io.ReadWriteCloser) *dapClient {
-	return &dapClient{
+	c := &dapClient{
 		rwc:    rwc,
 		reader: bufio.NewReader(rwc),
 		seq:    1,
+		msgCh:  make(chan dapMessage, 8),
+		done:   make(chan struct{}),
 	}
+	go c.readLoop()
+	return c
 }
 
 func (c *dapClient) Close() {
+	close(c.done)
 	c.rwc.Close()
 }
 
 func (c *dapClient) SetProtocolLogger(w io.Writer) {
 	c.logWriter = w
+}
+
+func (c *dapClient) readLoop() {
+	defer close(c.msgCh)
+	for {
+		msg, err := dap.ReadProtocolMessage(c.reader)
+		select {
+		case c.msgCh <- dapMessage{msg, err}:
+			if err != nil {
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func (c *dapClient) ReadMessage() (dap.Message, error) {
+	dm, ok := <-c.msgCh
+	if !ok {
+		return nil, io.EOF
+	}
+	if dm.err != nil {
+		return nil, dm.err
+	}
+	if c.logWriter != nil {
+		if data, merr := json.Marshal(dm.msg); merr == nil {
+			fmt.Fprintf(c.logWriter, "RECV: <<<%s>>>\n", data)
+		}
+	}
+	return dm.msg, nil
+}
+
+func (c *dapClient) ReadMessageWithContext(ctx context.Context) (dap.Message, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case dm, ok := <-c.msgCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		if dm.err != nil {
+			return nil, dm.err
+		}
+		if c.logWriter != nil {
+			if data, merr := json.Marshal(dm.msg); merr == nil {
+				fmt.Fprintf(c.logWriter, "RECV: <<<%s>>>\n", data)
+			}
+		}
+		return dm.msg, nil
+	}
 }
 
 func (c *dapClient) InitializeRequest(ctx context.Context, adapterID string) (dap.Capabilities, error) {
@@ -119,37 +188,6 @@ func (c *dapClient) InitializeRequest(ctx context.Context, adapterID string) (da
 		default:
 			return dap.Capabilities{}, fmt.Errorf("expected InitializeResponse, got %T", msg)
 		}
-	}
-}
-
-func (c *dapClient) ReadMessage() (dap.Message, error) {
-	msg, err := dap.ReadProtocolMessage(c.reader)
-	if err != nil {
-		return nil, err
-	}
-	if c.logWriter != nil {
-		if data, merr := json.Marshal(msg); merr == nil {
-			fmt.Fprintf(c.logWriter, "RECV: <<<%s>>>\n", data)
-		}
-	}
-	return msg, nil
-}
-
-func (c *dapClient) ReadMessageWithContext(ctx context.Context) (dap.Message, error) {
-	type result struct {
-		msg dap.Message
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		msg, err := c.ReadMessage()
-		ch <- result{msg, err}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-ch:
-		return r.msg, r.err
 	}
 }
 

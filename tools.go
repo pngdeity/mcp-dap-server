@@ -226,12 +226,15 @@ func (ds *debuggerSession) continueExecution(ctx context.Context, _ *mcp.CallToo
 		case *dap.StoppedEvent:
 			ds.stoppedThreadID = resp.Body.ThreadId
 			ds.lastHitBreakpointIds = resp.Body.HitBreakpointIds
-			result, err := ds.getFullContext(ctx,resp.Body.ThreadId, 0, 20)
+			result, err := ds.getFullContext(ctx, resp.Body.ThreadId, 0, 20)
+			if err != nil {
+				return nil, nil, err
+			}
 			if outputBuf.Len() > 0 {
 				result = prependOutputToResult(result, outputBuf.String())
 			}
-			if err != nil || params.FullContext {
-				return result, nil, err
+			if params.FullContext {
+				return result, nil, nil
 			}
 			return stopSummary(result, resp.Body.Reason, resp.Body.HitBreakpointIds), nil, nil
 		case *dap.TerminatedEvent:
@@ -805,12 +808,15 @@ func (ds *debuggerSession) handleFirstStop(ctx context.Context, params DebugPara
 				if ds.stoppedThreadID == 0 {
 					ds.stoppedThreadID = 1
 				}
-				result, err := ds.getFullContext(ctx,ds.stoppedThreadID, 0, 20)
+				result, err := ds.getFullContext(ctx, ds.stoppedThreadID, 0, 20)
+				if err != nil {
+					return nil, nil, err
+				}
 				if outputBuf.Len() > 0 {
 					result = prependOutputToResult(result, outputBuf.String())
 				}
-				if err != nil || params.FullContext {
-					return result, nil, err
+				if params.FullContext {
+					return result, nil, nil
 				}
 				return stopSummary(result, ev.Body.Reason, ev.Body.HitBreakpointIds), nil, nil
 			case dap.EventMessage:
@@ -857,42 +863,36 @@ func (ds *debuggerSession) handleFirstStop(ctx context.Context, params DebugPara
 		if stoppedThreadID == 0 {
 			stoppedThreadID = 1
 		}
-		result, err := ds.getFullContext(ctx,stoppedThreadID, 0, 20)
+		result, err := ds.getFullContext(ctx, stoppedThreadID, 0, 20)
+		if err != nil {
+			return nil, nil, err
+		}
 		if outputBuf.Len() > 0 {
 			result = prependOutputToResult(result, outputBuf.String())
 		}
-		if err != nil || params.FullContext {
-			return result, nil, err
+		if params.FullContext {
+			return result, nil, nil
 		}
 		return stopSummary(result, "breakpoint", stoppedHitBreakpointIds), nil, nil
 	}
 
-	msg, err := ds.client.ReadMessage()
-	if err != nil {
-		return nil, nil, err
-	}
-	switch ev := msg.(type) {
-	case *dap.StoppedEvent:
-		ds.stoppedThreadID = ev.Body.ThreadId
-	case *dap.TerminatedEvent:
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
-		}, nil, nil
-	}
-	// Drain leftover events before returning so the next tool call does not
-	// consume a stale StoppedEvent as a spurious stop.
 	for {
 		msg, err := ds.client.ReadMessageWithContext(ctx)
 		if err != nil {
-			break
+			return nil, nil, err
 		}
-		if _, ok := msg.(dap.EventMessage); !ok {
-			break
+		switch ev := msg.(type) {
+		case *dap.StoppedEvent:
+			ds.stoppedThreadID = ev.Body.ThreadId
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Debug session started for %s. Use 'breakpoint' to set breakpoints and 'continue' to run.", params.Path)}},
+			}, nil, nil
+		case *dap.TerminatedEvent:
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "Program terminated"}},
+			}, nil, nil
 		}
 	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Debug session started for %s. Use 'breakpoint' to set breakpoints and 'continue' to run.", params.Path)}},
-	}, nil, nil
 }
 
 // context returns the full debugging context at the current location.
@@ -907,7 +907,7 @@ func (ds *debuggerSession) context(ctx context.Context, _ *mcp.CallToolRequest, 
 	if maxFrames == 0 {
 		maxFrames = 20
 	}
-	result, err := ds.getFullContext(ctx,threadID, params.FrameID.Int(), maxFrames)
+	result, err := ds.getFullContext(ctx, threadID, params.FrameID.Int(), maxFrames)
 	if err != nil {
 		// If the thread ID was invalid, try to help by listing available threads
 		if strings.Contains(err.Error(), "threadId") {
@@ -985,12 +985,15 @@ func (ds *debuggerSession) step(ctx context.Context, _ *mcp.CallToolRequest, par
 		case *dap.StoppedEvent:
 			ds.stoppedThreadID = resp.Body.ThreadId
 			ds.lastHitBreakpointIds = resp.Body.HitBreakpointIds
-			result, err := ds.getFullContext(ctx,resp.Body.ThreadId, 0, 20)
+			result, err := ds.getFullContext(ctx, resp.Body.ThreadId, 0, 20)
+			if err != nil {
+				return nil, nil, err
+			}
 			if outputBuf.Len() > 0 {
 				result = prependOutputToResult(result, outputBuf.String())
 			}
-			if err != nil || params.FullContext {
-				return result, nil, err
+			if params.FullContext {
+				return result, nil, nil
 			}
 			return stopSummary(result, resp.Body.Reason, resp.Body.HitBreakpointIds), nil, nil
 		case *dap.TerminatedEvent:

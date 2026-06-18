@@ -133,9 +133,11 @@ Examples: {"expression": "x + y"}, {"expression": "*ptr"}, {"expression": "$rsp"
 For GDB commands (e.g. print/x), use context 'repl': {"expression": "print/x var", "context": "repl"}`,
 	}, ds.evaluateExpression)
 
-	infoTypes := "'threads' (list all threads with IDs, default)"
+	infoTypes := "'threads' (list all threads with IDs)"
 	if ds.capabilities.SupportsLoadedSourcesRequest {
-		infoTypes += ", 'sources' (loaded source file paths)"
+		infoTypes += ", 'sources' (loaded source file paths, default)"
+	} else {
+		infoTypes += " (default)"
 	}
 	if ds.capabilities.SupportsModulesRequest {
 		infoTypes += ", 'modules' (loaded modules/libraries)"
